@@ -1,17 +1,43 @@
 #include "serialslider.h"
 
 #define comPort "COM1"
+
+#define READ_BUF_SIZE 256
+#define READ_TIMEOUT 500
 // Global state
 HANDLE hPort; // 串口句柄
 DCB dcb; // 串口参数结构体
 COMMTIMEOUTS timeouts; // 串口超时结构体
 OVERLAPPED ovWrite;
 BOOL fWaitingOnRead = FALSE, fWaitingOnWrite = FALSE;
+slider_packet_t request;
 
-#define READ_BUF_SIZE 256
-#define READ_TIMEOUT 500
+// 临界区用于保护队列
+CRITICAL_SECTION cs;
 
-//char comPort[10];
+Queue* createQueue(int capacity) {
+    Queue* queue = (Queue*)malloc(sizeof(Queue));
+    queue->capacity = capacity;
+    queue->front = queue->size = 0;
+    queue->rear = capacity - 1;
+    queue->items = (char*)malloc(queue->capacity * sizeof(char));
+    return queue;
+}
+
+void enqueue(Queue* queue, char item) {
+    if (queue->size == queue->capacity) return;
+    queue->rear = (queue->rear + 1) % queue->capacity;
+    queue->items[queue->rear] = item;
+    queue->size = queue->size + 1;
+}
+
+char dequeue(Queue* queue) {
+    if (queue->size == 0) return '\0';
+    char item = queue->items[queue->front];
+    queue->front = (queue->front + 1) % queue->capacity;
+    queue->size = queue->size - 1;
+    return item;
+}
 
 // Windows Serial helpers
 BOOL open_port()
@@ -20,7 +46,7 @@ BOOL open_port()
     hPort = CreateFile(comPort, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (hPort == INVALID_HANDLE_VALUE)
     {
-        printf("can't open %s!\n", comPort);
+        //printf("can't open %s!\n", comPort);
         return FALSE;
     }
 
@@ -38,13 +64,13 @@ BOOL open_port()
 
     // 设置串口超时
     timeouts.ReadIntervalTimeout = 1; // 设置读取间隔超时为1毫秒
-    timeouts.ReadTotalTimeoutConstant = 100; // 设置读取总超时常量为10毫秒
-    timeouts.ReadTotalTimeoutMultiplier = 10; // 设置读取总超时乘数为10毫秒
+    timeouts.ReadTotalTimeoutConstant = 20; // 设置读取总超时常量为100毫秒
+    timeouts.ReadTotalTimeoutMultiplier = 10; // 设置读取总超时乘数为1毫秒
     timeouts.WriteTotalTimeoutConstant = 1000; // 设置写入总超时常量为1000毫秒
     timeouts.WriteTotalTimeoutMultiplier = 10; // 设置写入总超时乘数为10毫秒
     SetCommTimeouts(hPort, &timeouts);
-	EscapeCommFunction(hPort,5); //发送DTR信号
-	EscapeCommFunction(hPort,3); //发送RTS信号
+	//EscapeCommFunction(hPort,5); //发送DTR信号
+	//EscapeCommFunction(hPort,3); //发送RTS信号
     // 返回成功
     return TRUE;
 }
@@ -149,65 +175,78 @@ void sliderserial_writeresp(slider_packet_t *request) {
 //     return 0;
 // }
 
-uint8_t sliderserial_readreq(slider_packet_t *reponse) {
-	package_init(reponse);
+DWORD WINAPI sliderserial_read_thread(LPVOID param) {
+    Queue* queue = (Queue*)param;
+	uint8_t buffer[BUFSIZE] = {0};
+	long unsigned int recv_len;
+    while (1) {
+		uint8_t result = ReadFile(hPort,  buffer, BUFSIZE-1, &recv_len, NULL);
+        if (result && recv_len){
+			EnterCriticalSection(&cs);
+			for(uint8_t i = 0;i<recv_len;i++){
+				char data = buffer[i];
+            	enqueue(queue, data);
+			}
+			LeaveCriticalSection(&cs);
+        }
+    }
+}
+BOOL serial_read1(uint8_t *result){
+	long unsigned int recv_len;
+	if (ReadFile(hPort,  result, 1, &recv_len, NULL) && (recv_len != 0)){
+		return TRUE;
+	}
+	else{
+		return false;
+	}
+	
+}
+
+uint8_t serial_read_cmd(slider_packet_t *reponse){
 	uint8_t checksum = 0;
 	uint8_t rep_size = 0;
-	long unsigned int recv_len;
-	uint8_t buffer[BUFSIZE] = {0};
 	BOOL ESC = FALSE;
-	uint8_t revice_complete_retry = 2;
-	PurgeComm(hPort, PURGE_RXCLEAR );
-	// uint8_t result = read_serial_port(buffer, recv_len) ;
-	// while(result == 0 && result == 2){
-	// 	result = read_serial_port(buffer, recv_len);
-	// }
-	while(revice_complete_retry){
-		uint8_t result = ReadFile(hPort,  buffer, BUFSIZE-1, &recv_len, NULL);
-		if (result && recv_len){
-			for(uint8_t i = 0;i<recv_len;i++){
-				uint8_t c = buffer[i];
-				if(c == 0xff){
-					package_init(reponse);
-					rep_size = 0;
-					reponse->syn = c;
-					checksum += reponse->syn;
-					continue;
-				}
-				if(reponse->syn == 0){
-					continue;
-				}
-				if(c == 0xfd){
-					ESC = TRUE;
-					continue;
-				}
-				if(ESC){
-					c ++;
-					ESC = FALSE;
-				}
-
-				if(reponse->cmd == 0){
-					reponse->cmd = c;
-					checksum += reponse->cmd;
-					continue;
-				}
-				else if(rep_size == 0){
-					reponse->size = c;
-					rep_size = 3;
-					checksum += reponse->size;
-					continue;
-				}
-				reponse->data[rep_size] = c;
-				checksum += c;
-				if ((rep_size == reponse->size + 4) && (rep_size >128) ){
-					return reponse->cmd;
-				}
-				rep_size++;
+	uint8_t c;
+	while(serial_read1(&c)){
+		//printf("%X",c);
+		if(c == 0xff){
+			package_init(reponse);
+			rep_size = 0;
+			reponse->syn = c;
+			ESC = FALSE;
+			checksum += 0xff;
+			continue;
 			}
+		if(reponse->syn != 0xff){
+			continue;
 		}
-		revice_complete_retry --;
+		if(c == 0xfd){
+			ESC = TRUE;
+			continue;
+		}
+		if(ESC){
+			c ++;
+			ESC = FALSE;
+		}
+		if(reponse->cmd == 0){
+			reponse->cmd = c;
+			checksum += reponse->cmd;
+			continue;
+		}
+		if(rep_size == 0){
+			reponse->size = c;
+			rep_size = 3;
+			checksum += reponse->size;
+			continue;
+		}
+		reponse->data[rep_size] = c;
+		checksum += c;
+		if ((rep_size == reponse->size + 3) || (rep_size >128) ){
+			return reponse->cmd;
+		}
+		rep_size++;
 	}
-	return reponse->cmd;
+	return 0xff;
 }
 
 void slider_rst(){
@@ -216,7 +255,7 @@ void slider_rst(){
 	request.cmd = SLIDER_CMD_RESET;
 	request.size = 0;
 	sliderserial_writeresp(&request);
-	Sleep(1);
+	//Sleep(1);
 }
 
 void slider_start_scan(){
@@ -237,6 +276,24 @@ void slider_stop_scan(){
 	Sleep(1);
 }
 
+void slider_start_air_scan(){
+	package_init(&request);
+	request.syn = 0xff;
+	request.cmd = SLIDER_CMD_AUTO_AIR_START;
+	request.size = 0;
+	sliderserial_writeresp(&request);
+	Sleep(1);
+}
+
+// void slider_stop_air_scan(){
+// 	package_init(&request);
+// 	request.syn = 0xff;
+// 	request.cmd = SLIDER_CMD_AUTO_AIR_STOP;
+// 	request.size = 0;
+// 	sliderserial_writeresp(&request);
+// 	//Sleep(1);
+// }
+
 void slider_send_leds(const uint8_t *rgb){
 	package_init(&request);
 	request.syn = 0xff;
@@ -244,7 +301,7 @@ void slider_send_leds(const uint8_t *rgb){
 	request.size = 96;
 	memcpy(request.leds, rgb, 96);
 	sliderserial_writeresp(&request);
-	Sleep(3);
+	//Sleep(3);
 }
 
 void slider_send_air_leds_left(const uint8_t *rgb){
@@ -254,7 +311,7 @@ void slider_send_air_leds_left(const uint8_t *rgb){
 	request.size = 9;
 	memcpy(request.air_leds, rgb, 9);
 	sliderserial_writeresp(&request);
-	Sleep(1);
+	//Sleep(1);
 }
 
 void slider_send_air_leds_right(const uint8_t *rgb){
@@ -264,5 +321,5 @@ void slider_send_air_leds_right(const uint8_t *rgb){
 	request.size = 9;
 	memcpy(request.air_leds, rgb, 9);
 	sliderserial_writeresp(&request);
-	Sleep(1);
+	//Sleep(1);
 }

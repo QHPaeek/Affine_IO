@@ -1,3 +1,5 @@
+#ifndef SERIALSLIDER_H
+#define SERIALSLIDER_H
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -46,13 +48,30 @@ typedef union slider_packet {
 	uint8_t data[BUFSIZE];
 } slider_packet_t;
 
-slider_packet_t request;
+typedef struct Queue {
+    char* items;
+    int front;
+    int rear;
+    int size;
+    int capacity;
+} Queue;
 
+extern slider_packet_t request;
+extern CRITICAL_SECTION cs;
+
+Queue* createQueue(int capacity);
+void enqueue(Queue* queue, char item);
+char dequeue(Queue* queue);
 BOOL open_port();
 void sliderserial_writeresp(slider_packet_t *request);
-uint8_t sliderserial_readreq(slider_packet_t *reponse);
+DWORD WINAPI sliderserial_read_thread(LPVOID param);
+BOOL serial_read1(uint8_t *result);
+uint8_t serial_read_cmd(slider_packet_t *reponse);
 void package_init(slider_packet_t *request);
 void slider_rst();
 void slider_start_scan();
 void slider_stop_scan();
 void slider_send_leds(const uint8_t *rgb);
+void slider_start_air_scan();
+
+#endif

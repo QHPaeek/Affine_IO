@@ -21,6 +21,10 @@ static HANDLE chuni_io_slider_thread;
 static bool chuni_io_slider_stop_flag;
 static struct chuni_io_config chuni_io_cfg;
 
+typedef struct {
+    chuni_io_slider_callback_t callback;
+    Queue* queue;
+} callback_context;
 
 uint16_t chuni_io_get_api_version(void)
 {
@@ -75,18 +79,19 @@ HRESULT chuni_io_slider_init(void)
 
 void chuni_io_slider_start(chuni_io_slider_callback_t callback)
 {
+    slider_start_air_scan();
     slider_start_scan();
     if (chuni_io_slider_thread != NULL) {
         return;
     }
 
-    chuni_io_slider_thread = (HANDLE) _beginthreadex(
-            NULL,
-            0,
-            chuni_io_slider_thread_proc,
-            callback,
-            0,
-            NULL);
+    InitializeCriticalSection(&cs);
+    Queue* queue = createQueue(100);
+    callback_context* ctx = (callback_context*)malloc(sizeof(callback_context));
+    ctx->callback = callback;
+    ctx->queue = queue;
+    // CreateThread(NULL, 0, sliderserial_read_thread, queue, 0, NULL);
+    chuni_io_slider_thread = (HANDLE) _beginthreadex(NULL,0,chuni_io_slider_thread_proc,ctx,0,NULL);
 }
 
 void chuni_io_slider_stop(void)
@@ -112,17 +117,17 @@ void chuni_io_slider_set_leds(const uint8_t *rgb)
 
 void chuni_io_led_set_colors(uint8_t board,uint8_t *rgb_raw)
 {
-    uint8_t air_rgb[9];
-    if(board == 0){
-        for(uint8_t i=0;i<9;i++){
-            air_rgb[i] = rgb_raw[150+i];
-        }
-    }
-    else if(board == 1){
-        for(uint8_t i=0;i<9;i++){
-            air_rgb[i] = rgb_raw[180+i];
-        }
-    }
+    // uint8_t air_rgb[9];
+    // if(board == 0){
+    //     for(uint8_t i=0;i<9;i++){
+    //         air_rgb[i] = rgb_raw[150+i];
+    //     }
+    // }
+    // else if(board == 1){
+    //     for(uint8_t i=0;i<9;i++){
+    //         air_rgb[i] = rgb_raw[180+i];
+    //     }
+    // }
 }
 
 HRESULT chuni_io_led_init(void)
@@ -130,23 +135,31 @@ HRESULT chuni_io_led_init(void)
     return S_OK;
 }
 
-static unsigned int __stdcall chuni_io_slider_thread_proc(void *ctx)
+static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
 {
-    chuni_io_slider_callback_t callback;
+    callback_context* ctx = (callback_context*)param;
+    chuni_io_slider_callback_t callback = ctx->callback;
+    //Queue* queue = ctx->queue;
     slider_packet_t reponse;
     uint8_t pressure[32];
-    size_t i;
-
-    callback = ctx;
+	BOOL ESC = FALSE;
+	// uint8_t result = read_serial_port(buffer, recv_len) ;
+	// while(result == 0 && result == 2){
+	// 	result = read_serial_port(buffer, recv_len);
+	// }
+    package_init(&reponse);	
 
     while (!chuni_io_slider_stop_flag) {
-        switch (sliderserial_readreq(&reponse)) {
+        switch (serial_read_cmd(&reponse)) {
 		    case SLIDER_CMD_AUTO_SCAN:
 			    memcpy(pressure, reponse.pressure, 32);
-                //memset(pressure,20,32);
+                package_init(&reponse);
+                callback(pressure);
+                Sleep(1);
 			    break;
             case SLIDER_CMD_AUTO_AIR:
                 Air_key_Status = reponse.air_status;
+                package_init(&reponse);
                 break;
             // case 0:
             //     memset(pressure,10,32);
@@ -160,8 +173,8 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void *ctx)
             default:
                 break;
         }
-        callback(pressure);
-        Sleep(1);
+        // callback(pressure);
+        // Sleep(1);
     }
     return 0;
 }
