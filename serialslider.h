@@ -63,6 +63,8 @@ Queue* createQueue(int capacity);
 void enqueue(Queue* queue, char item);
 char dequeue(Queue* queue);
 BOOL open_port();
+void close_port();
+BOOL IsSerialPortOpen();
 void sliderserial_writeresp(slider_packet_t *request);
 DWORD WINAPI sliderserial_read_thread(LPVOID param);
 BOOL serial_read1(uint8_t *result);

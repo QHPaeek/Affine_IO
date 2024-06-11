@@ -148,14 +148,13 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
 	// 	result = read_serial_port(buffer, recv_len);
 	// }
     package_init(&reponse);	
-
     while (!chuni_io_slider_stop_flag) {
         switch (serial_read_cmd(&reponse)) {
 		    case SLIDER_CMD_AUTO_SCAN:
 			    memcpy(pressure, reponse.pressure, 32);
                 package_init(&reponse);
                 callback(pressure);
-                Sleep(1);
+                //Sleep(1);
 			    break;
             case SLIDER_CMD_AUTO_AIR:
                 Air_key_Status = reponse.air_status;
@@ -164,15 +163,35 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
             // case 0:
             //     memset(pressure,10,32);
             //     break;
-            // case 0xff:
-            //     memset(pressure,30,32);
-            //     break;
+            case 0xff:
+                memset(pressure,0, 32);
+                callback(pressure);
+                close_port();
+                while(!open_port()){
+                    close_port();
+                    //memset(pressure,0, 32);
+                    callback(pressure);
+                    Sleep(1);
+                }
+                slider_start_air_scan();
+                slider_start_scan();
+                callback(pressure);
+                break;
             // case 0xfd:
             //     memset(pressure,40,32);
             //     break;
             default:
                 break;
         }
+        // if (!IsSerialPortOpen()) {
+        //     while(!open_port()){
+        //         slider_start_air_scan();
+        //         slider_start_scan();
+        //         memset(pressure,0, 32);
+        //         callback(pressure);
+        //         Sleep(1);
+        //     }
+        // }
         // callback(pressure);
         // Sleep(1);
     }

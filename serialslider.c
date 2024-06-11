@@ -11,6 +11,7 @@ COMMTIMEOUTS timeouts; // 串口超时结构体
 OVERLAPPED ovWrite;
 BOOL fWaitingOnRead = FALSE, fWaitingOnWrite = FALSE;
 slider_packet_t request;
+BOOL Serial_Status;//串口状态（是否成功打开）
 
 // 临界区用于保护队列
 CRITICAL_SECTION cs;
@@ -64,14 +65,32 @@ BOOL open_port()
 
     // 设置串口超时
     timeouts.ReadIntervalTimeout = 1; // 设置读取间隔超时为1毫秒
-    timeouts.ReadTotalTimeoutConstant = 20; // 设置读取总超时常量为100毫秒
-    timeouts.ReadTotalTimeoutMultiplier = 10; // 设置读取总超时乘数为1毫秒
+    timeouts.ReadTotalTimeoutConstant = 20; // 设置读取总超时常量为20毫秒
+    timeouts.ReadTotalTimeoutMultiplier = 10; // 设置读取总超时乘数为10毫秒
     timeouts.WriteTotalTimeoutConstant = 1000; // 设置写入总超时常量为1000毫秒
     timeouts.WriteTotalTimeoutMultiplier = 10; // 设置写入总超时乘数为10毫秒
     SetCommTimeouts(hPort, &timeouts);
-	//EscapeCommFunction(hPort,5); //发送DTR信号
+	EscapeCommFunction(hPort,5); //发送DTR信号
 	//EscapeCommFunction(hPort,3); //发送RTS信号
     // 返回成功
+    return TRUE;
+}
+
+void close_port(){
+	CloseHandle(hPort);
+	hPort = INVALID_HANDLE_VALUE;
+}
+
+// 检查串口是否打开
+BOOL IsSerialPortOpen() {
+    DWORD errors;
+    COMSTAT status;
+
+    ClearCommError(hPort, &errors, &status);
+    if (errors > 0) {
+        return FALSE;
+    }
+
     return TRUE;
 }
 
@@ -92,9 +111,9 @@ BOOL send_data(int length,uint8_t *send_buffer)
     // 写入数据
     if (!WriteFile(hPort, send_buffer, length, &bytes_written, NULL))
     {
-        printf("can't write data to");
-		printf(comPort);
-		printf("/n");
+        // printf("can't write data to");
+		// printf(comPort);
+		// printf("/n");
         return FALSE;
     }
     // 返回成功
@@ -175,22 +194,22 @@ void sliderserial_writeresp(slider_packet_t *request) {
 //     return 0;
 // }
 
-DWORD WINAPI sliderserial_read_thread(LPVOID param) {
-    Queue* queue = (Queue*)param;
-	uint8_t buffer[BUFSIZE] = {0};
-	long unsigned int recv_len;
-    while (1) {
-		uint8_t result = ReadFile(hPort,  buffer, BUFSIZE-1, &recv_len, NULL);
-        if (result && recv_len){
-			EnterCriticalSection(&cs);
-			for(uint8_t i = 0;i<recv_len;i++){
-				char data = buffer[i];
-            	enqueue(queue, data);
-			}
-			LeaveCriticalSection(&cs);
-        }
-    }
-}
+// DWORD WINAPI sliderserial_read_thread(LPVOID param) {
+//     Queue* queue = (Queue*)param;
+// 	uint8_t buffer[BUFSIZE] = {0};
+// 	long unsigned int recv_len;
+//     while (1) {
+// 		uint8_t result = ReadFile(hPort,  buffer, BUFSIZE-1, &recv_len, NULL);
+//         if (result && recv_len){
+// 			EnterCriticalSection(&cs);
+// 			for(uint8_t i = 0;i<recv_len;i++){
+// 				char data = buffer[i];
+//             	enqueue(queue, data);
+// 			}
+// 			LeaveCriticalSection(&cs);
+//         }
+//     }
+// }
 BOOL serial_read1(uint8_t *result){
 	long unsigned int recv_len;
 	if (ReadFile(hPort,  result, 1, &recv_len, NULL) && (recv_len != 0)){

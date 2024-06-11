@@ -14,7 +14,6 @@ void main(){
     slider_start_air_scan();
     slider_start_scan();
     slider_send_leds(rgb);
-    uint8_t c;
     while(1){
         switch (serial_read_cmd(&reponse)) {
             case SLIDER_CMD_AUTO_SCAN:
@@ -39,15 +38,41 @@ void main(){
             // case 0:
             //     memset(pressure,10,32);
             //     break;
-            // case 0xff:
-            //     memset(pressure,30,32);
-            //     break;
+            case 0xff:
+                close_port();
+                while(!open_port()){
+                    close_port();
+                    printf("Ground key:");
+                    memset(pressure, 0, 32);
+                    for(uint8_t i=0;i<32;i++){
+                        printf("%X ",pressure[i]);
+                    }
+                    printf("\n");
+                    Sleep(1);
+                }
+                slider_start_air_scan();
+                slider_start_scan();
+                slider_send_leds(rgb);
+                break;
             // case 0xfd:
             //     memset(pressure,40,32);
             //     break;
             default:
-                //printf("no command \n");
+                printf("no command \n");
                 break;
+                
+        }
+        if (!IsSerialPortOpen()) {
+            close_port();
+            while(!open_port()){
+                close_port();
+                //memset(pressure,0, 32);
+                //callback(pressure);
+                Sleep(1);
+            }
+            slider_start_air_scan();
+            slider_start_scan();
+            slider_send_leds(rgb);
         }
     }
 }
