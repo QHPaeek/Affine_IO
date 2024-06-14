@@ -65,9 +65,9 @@ BOOL open_port()
 
     // 设置串口超时
     timeouts.ReadIntervalTimeout = 1; // 设置读取间隔超时为1毫秒
-    timeouts.ReadTotalTimeoutConstant = 20; // 设置读取总超时常量为20毫秒
-    timeouts.ReadTotalTimeoutMultiplier = 10; // 设置读取总超时乘数为10毫秒
-    timeouts.WriteTotalTimeoutConstant = 1000; // 设置写入总超时常量为1000毫秒
+    timeouts.ReadTotalTimeoutConstant = 5; // 设置读取总超时常量为5毫秒
+    timeouts.ReadTotalTimeoutMultiplier = 1; // 设置读取总超时乘数为1毫秒
+    timeouts.WriteTotalTimeoutConstant = 100; // 设置写入总超时常量为100毫秒
     timeouts.WriteTotalTimeoutMultiplier = 10; // 设置写入总超时乘数为10毫秒
     SetCommTimeouts(hPort, &timeouts);
 	EscapeCommFunction(hPort,5); //发送DTR信号
@@ -226,6 +226,8 @@ uint8_t serial_read_cmd(slider_packet_t *reponse){
 	uint8_t rep_size = 0;
 	BOOL ESC = FALSE;
 	uint8_t c;
+	COMSTAT comStat;
+	DWORD   dwErrors = 0;
 	while(serial_read1(&c)){
 		//printf("%X",c);
 		if(c == 0xff){
@@ -265,7 +267,13 @@ uint8_t serial_read_cmd(slider_packet_t *reponse){
 		}
 		rep_size++;
 	}
+	//ClearCommError(hPort, &dwErrors, &comStat);
+	if (!GetCommState(hPort, &dcb)) {
+	//if (dwErrors) {
+    // 串口已断开
 	return 0xff;
+	}
+	return 0xfe;
 }
 
 void slider_rst(){

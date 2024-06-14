@@ -154,15 +154,11 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
 			    memcpy(pressure, reponse.pressure, 32);
                 package_init(&reponse);
                 callback(pressure);
-                //Sleep(1);
 			    break;
             case SLIDER_CMD_AUTO_AIR:
                 Air_key_Status = reponse.air_status;
                 package_init(&reponse);
                 break;
-            // case 0:
-            //     memset(pressure,10,32);
-            //     break;
             case 0xff:
                 memset(pressure,0, 32);
                 callback(pressure);
@@ -177,23 +173,20 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                 slider_start_scan();
                 callback(pressure);
                 break;
-            // case 0xfd:
-            //     memset(pressure,40,32);
-            //     break;
             default:
                 break;
         }
         // if (!IsSerialPortOpen()) {
+        //     close_port();
         //     while(!open_port()){
-        //         slider_start_air_scan();
-        //         slider_start_scan();
+        //         close_port();
         //         memset(pressure,0, 32);
         //         callback(pressure);
         //         Sleep(1);
         //     }
+        //     slider_start_air_scan();
+        //     slider_start_scan();
         // }
-        // callback(pressure);
-        // Sleep(1);
     }
     return 0;
 }
