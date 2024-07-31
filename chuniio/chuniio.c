@@ -79,6 +79,7 @@ HRESULT chuni_io_slider_init(void)
 
 void chuni_io_slider_start(chuni_io_slider_callback_t callback)
 {
+    Sleep(1);
     slider_start_air_scan();
     slider_start_scan();
     if (chuni_io_slider_thread != NULL) {
@@ -152,11 +153,15 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
         switch (serial_read_cmd(&reponse)) {
 		    case SLIDER_CMD_AUTO_SCAN:
 			    memcpy(pressure, reponse.pressure, 32);
+                if(reponse.size == 33){
+                    //32个触摸按键后跟随一位天键
+                    Air_key_Status = reponse.air_status;
+                }
                 package_init(&reponse);
                 callback(pressure);
 			    break;
             case SLIDER_CMD_AUTO_AIR:
-                Air_key_Status = reponse.air_status;
+                Air_key_Status = reponse._air_status;
                 package_init(&reponse);
                 break;
             case 0xff:
@@ -169,6 +174,7 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                     callback(pressure);
                     Sleep(1);
                 }
+                Sleep(1);
                 slider_start_air_scan();
                 slider_start_scan();
                 callback(pressure);

@@ -40,9 +40,12 @@ typedef union slider_packet {
 				uint8_t leds[96];
 			};
 			char version[32];
-			uint8_t pressure[32];
-			uint8_t air_status;
+			struct{
+				uint8_t pressure[32];
+				uint8_t air_status;
+			};
 			uint8_t air_leds[9];
+			uint8_t _air_status;
 		};
 	};
 	uint8_t data[BUFSIZE];

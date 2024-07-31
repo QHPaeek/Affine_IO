@@ -229,7 +229,6 @@ uint8_t serial_read_cmd(slider_packet_t *reponse){
 	COMSTAT comStat;
 	DWORD   dwErrors = 0;
 	while(serial_read1(&c)){
-		//printf("%X",c);
 		if(c == 0xff){
 			package_init(reponse);
 			rep_size = 0;
@@ -267,9 +266,7 @@ uint8_t serial_read_cmd(slider_packet_t *reponse){
 		}
 		rep_size++;
 	}
-	//ClearCommError(hPort, &dwErrors, &comStat);
 	if (!GetCommState(hPort, &dcb)) {
-	//if (dwErrors) {
     // 串口已断开
 	return 0xff;
 	}

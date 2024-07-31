@@ -13,8 +13,9 @@ void main(){
     open_port();
     slider_start_air_scan();
     slider_start_scan();
-    slider_send_leds(rgb);
+    //slider_send_leds(rgb);
     while(1){
+        //slider_send_leds(rgb);
         switch (serial_read_cmd(&reponse)) {
             case SLIDER_CMD_AUTO_SCAN:
                 //system("cls");
@@ -29,7 +30,7 @@ void main(){
                 break;
             case SLIDER_CMD_AUTO_AIR:
                 printf("air key:");
-                for(uint8_t i=0;i<6;i++){
+                for(uint8_t i=0;i<6;i++){.
                     printf("%X ",reponse.air_status&(1<<i));
                 }
                 printf("\n");
