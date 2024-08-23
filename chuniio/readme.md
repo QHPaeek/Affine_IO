@@ -6,14 +6,20 @@ Affine IO-Chuni
 
 编译测试exe程序：
 
-`gcc -o test .\test.c .\serialslider.c`
+```
+gcc -o test .\test.c .\serialslider.c  -lsetupapi
+```
 
 编译DLL文件：
 
-`gcc -shared -o chuniio_affine.dll .\chuniio.c .\config.c .\serialslider.c`
+```
+gcc -shared -o chuniio_affine.dll .\chuniio.c .\config.c .\serialslider.c -lsetupapi`
+```
 
 在Segatool中使用：
 
-`[chuniio]
+```
+[chuniio]
 ; If you wish to sideload a different chuniio, specify the DLL path here
-path=chuniio_affine.dll`
+path=chuniio_affine.dll
+```

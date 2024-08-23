@@ -62,6 +62,7 @@ typedef struct Queue {
 extern slider_packet_t request;
 extern CRITICAL_SECTION cs;
 
+const char* GetSerialPortByVidPid(const char* vid, const char* pid);
 Queue* createQueue(int capacity);
 void enqueue(Queue* queue, char item);
 char dequeue(Queue* queue);

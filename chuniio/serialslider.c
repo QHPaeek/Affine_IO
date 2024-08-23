@@ -1,9 +1,57 @@
 #include "serialslider.h"
-
-#define comPort "COM1"
+#include <windows.h>
+//#include <setupapi.h>
+#include <stdio.h>
+#include <conio.h>
+#include <SetupAPI.h>
 
 #define READ_BUF_SIZE 256
 #define READ_TIMEOUT 500
+
+#pragma comment(lib, "setupapi.lib")
+
+char comPort[6] = {0};
+
+const char* GetSerialPortByVidPid(const char* vid, const char* pid) {
+    HDEVINFO deviceInfoSet;
+    SP_DEVINFO_DATA deviceInfoData;
+    DWORD i;
+    char hardwareId[1024];
+    static char portName[256];
+
+    // Get the device information set for all present devices
+    deviceInfoSet = SetupDiGetClassDevs(NULL, "USB", NULL, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+    if (deviceInfoSet == INVALID_HANDLE_VALUE) {
+        return "0";
+    }
+
+    deviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+    // Enumerate through all devices in the set
+    for (i = 0; SetupDiEnumDeviceInfo(deviceInfoSet, i, &deviceInfoData); i++) {
+        // Get the hardware ID
+        if (SetupDiGetDeviceRegistryProperty(deviceInfoSet, &deviceInfoData, SPDRP_HARDWAREID, NULL, (PBYTE)hardwareId, sizeof(hardwareId), NULL)) {
+            // Check if the hardware ID contains the VID and PID
+            if (strstr(hardwareId, vid) && strstr(hardwareId, pid)) {
+                // Get the port name
+                HKEY hDeviceKey = SetupDiOpenDevRegKey(deviceInfoSet, &deviceInfoData, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
+                if (hDeviceKey != INVALID_HANDLE_VALUE) {
+                    DWORD portNameSize = sizeof(portName);
+                    if (RegQueryValueEx(hDeviceKey, "PortName", NULL, NULL, (LPBYTE)portName, &portNameSize) == ERROR_SUCCESS) {
+                        RegCloseKey(hDeviceKey);
+                        SetupDiDestroyDeviceInfoList(deviceInfoSet);
+                        return portName;
+                    }
+                    RegCloseKey(hDeviceKey);
+                }
+            }
+        }
+    }
+
+    SetupDiDestroyDeviceInfoList(deviceInfoSet);
+    return "0";
+}
+
 // Global state
 HANDLE hPort; // 串口句柄
 DCB dcb; // 串口参数结构体

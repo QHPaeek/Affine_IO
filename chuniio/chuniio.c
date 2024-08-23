@@ -11,6 +11,9 @@
 
 uint8_t Air_key_Status;
 uint8_t Serial_CMD_Flag;
+extern char comPort[6];
+char* vid = "VID_AFF1";
+char* pid = "PID_52A4";
 
 static unsigned int __stdcall chuni_io_slider_thread_proc(void *ctx);
 
@@ -73,6 +76,11 @@ void chuni_io_jvs_poll(uint8_t *opbtn, uint8_t *beams)
 HRESULT chuni_io_slider_init(void)
 {
 	// Open ports
+    memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
+    if(*comPort == 0x48){ //找不到对应设备会返回“0”
+        char* default_comPort = "COM1";
+        memcpy(comPort,default_comPort,5);
+    }
     open_port();
     return S_OK;
 }
@@ -170,6 +178,11 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                 close_port();
                 while(!open_port()){
                     close_port();
+                    memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
+                    if(*comPort == 0x48){ //找不到对应设备会返回“0”
+                        char* default_comPort = "COM1";
+                        memcpy(comPort,default_comPort,5);
+                    }
                     //memset(pressure,0, 32);
                     callback(pressure);
                     Sleep(1);
