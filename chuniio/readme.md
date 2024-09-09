@@ -7,7 +7,7 @@ Affine IO-Chuni
 编译测试exe程序：
 
 ```
-gcc -o test .\test.c .\serialslider.c  -lsetupapi
+gcc .\test.c .\serialslider.c -o chuni_test.exe -lsetupapi
 ```
 
 编译DLL文件：
