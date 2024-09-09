@@ -4,7 +4,7 @@ Affine IO
 
 已经编译好的DLL文件请见build目录
 
-目前包括chuniio以及mai2io两款，后续将陆续支持其他游戏。
+目前包括chuniio以及mai2io、mecuryio三款，后续将陆续支持其他游戏。
 
 在进行商业使用前，请务必与作者取得联系。
 
