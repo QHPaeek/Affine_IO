@@ -175,7 +175,7 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                 }
                 if(!LED_status){
                     Air_key_Status = 0;
-                    memset(pressure,0,32);
+                    //memset(pressure,0,32);
                 }
                 package_init(&reponse);
                 callback(pressure);
