@@ -10,6 +10,7 @@
 #include "serialslider.h"
 
 uint8_t Air_key_Status;
+uint8_t LED_status;
 uint8_t Serial_CMD_Flag;
 extern char comPort[6];
 char* vid = "VID_AFF1";
@@ -121,6 +122,13 @@ void chuni_io_slider_stop(void)
 
 void chuni_io_slider_set_leds(const uint8_t *rgb)
 {
+    LED_status = 0;
+    for(uint8_t i =0;i<sizeof(rgb);i++){
+        if(rgb[i] != 0){
+            LED_status = 1;
+            break;
+        }
+    }
     slider_send_leds(rgb);
 }
 
@@ -165,11 +173,18 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                     //32个触摸按键后跟随一位天键
                     Air_key_Status = reponse.air_status;
                 }
+                if(!LED_status){
+                    Air_key_Status = 0;
+                    memset(pressure,0,32);
+                }
                 package_init(&reponse);
                 callback(pressure);
 			    break;
             case SLIDER_CMD_AUTO_AIR:
                 Air_key_Status = reponse._air_status;
+                if(!LED_status){
+                    Air_key_Status = 0;
+                }
                 package_init(&reponse);
                 break;
             case 0xff:
@@ -183,7 +198,7 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                         char* default_comPort = "COM1";
                         memcpy(comPort,default_comPort,5);
                     }
-                    //memset(pressure,0, 32);
+                    memset(pressure,0, 32);
                     callback(pressure);
                     Sleep(1);
                 }

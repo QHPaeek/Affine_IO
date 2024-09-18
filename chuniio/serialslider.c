@@ -18,11 +18,12 @@ const char* GetSerialPortByVidPid(const char* vid, const char* pid) {
     DWORD i;
     char hardwareId[1024];
     static char portName[256];
+	static char zero[10] = {0};
 
     // Get the device information set for all present devices
     deviceInfoSet = SetupDiGetClassDevs(NULL, "USB", NULL, DIGCF_PRESENT | DIGCF_ALLCLASSES);
     if (deviceInfoSet == INVALID_HANDLE_VALUE) {
-        return "0";
+        return zero;
     }
 
     deviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
@@ -49,7 +50,7 @@ const char* GetSerialPortByVidPid(const char* vid, const char* pid) {
     }
 
     SetupDiDestroyDeviceInfoList(deviceInfoSet);
-    return "0";
+    return zero;
 }
 
 // Global state
