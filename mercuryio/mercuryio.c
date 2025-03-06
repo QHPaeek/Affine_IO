@@ -8,7 +8,7 @@
 #include "config.h"
 
 #include "serialslider.h"
-extern char comPort[6];
+extern char comPort[13];
 char* vid = "VID_AFF1";
 char* pid = "PID_52A5";
 
@@ -78,7 +78,13 @@ HRESULT mercury_io_touch_init(void)
 {
     // Open ports
     memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-    if(*comPort == 0x48){ //找不到对应设备会返回“0”
+    if(comPort[5] != 0){
+        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+    }else if(comPort[4] != 0){
+        int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
+        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+    }else{
         char* default_comPort = "COM1";
         memcpy(comPort,default_comPort,5);
     }
@@ -111,6 +117,7 @@ static unsigned int __stdcall mercury_io_touch_thread_proc(void *ctx)
 {
     mercury_io_touch_callback_t callback;
     bool cellPressed[240];
+    uint8_t cell_raw[30];
     size_t i;
 
     callback = ctx;
@@ -120,21 +127,40 @@ static unsigned int __stdcall mercury_io_touch_thread_proc(void *ctx)
     while (1) {
         switch (serial_read_cmd(&reponse)) {
 		    case SLIDER_CMD_AUTO_SCAN:
-			    memcpy(cellPressed, reponse.pressure, 32);
+			    memcpy(cell_raw, reponse.cell, 30);
                 package_init(&reponse);
+                for(uint8_t i = 0;i<30;i++){
+                    for(uint8_t y=0;y<8;y++){
+                        if(cell_raw[i] & (1 << y)){
+                            cellPressed[i*8+y] = true;
+                        }else{
+                            cellPressed[i*8+y] = false;
+                        }
+                    }
+                }
                 callback(cellPressed);
 			    break;
             case 0xff:
-                memset(cellPressed,0, 240);
+                for(uint8_t i=0;i<240;i++){
+                    cellPressed[i] = false;
+                }
                 callback(cellPressed);
                 close_port();
                 while(!open_port()){
                     close_port();
+                    	// Open ports
                     memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-                    if(*comPort == 0x48){ //找不到对应设备会返回“0”
+                    if(comPort[5] != 0){
+                        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+                        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+                    }else if(comPort[4] != 0){
+                        int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
+                        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+                    }else{
                         char* default_comPort = "COM1";
                         memcpy(comPort,default_comPort,5);
                     }
+                    open_port();
                     //memset(pressure,0, 32);
                     callback(cellPressed);
                     Sleep(1);
@@ -143,7 +169,14 @@ static unsigned int __stdcall mercury_io_touch_thread_proc(void *ctx)
                 slider_start_scan();
                 callback(cellPressed);
                 break;
+            case 0xfe:
+                //printf("fe\n");
+                break;
             default:
+                // for(uint8_t i=0;i<240;i++){
+                //     cellPressed[i] = false;
+                // }
+                // callback(cellPressed);
                 break;
         }
     }

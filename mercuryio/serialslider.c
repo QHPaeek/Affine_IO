@@ -10,7 +10,7 @@
 
 #pragma comment(lib, "setupapi.lib")
 
-char comPort[6] = {0};
+char comPort[13] = {0};
 
 const char* GetSerialPortByVidPid(const char* vid, const char* pid) {
     HDEVINFO deviceInfoSet;
@@ -18,11 +18,12 @@ const char* GetSerialPortByVidPid(const char* vid, const char* pid) {
     DWORD i;
     char hardwareId[1024];
     static char portName[256];
+	static char zero[10] = {0};
 
     // Get the device information set for all present devices
     deviceInfoSet = SetupDiGetClassDevs(NULL, "USB", NULL, DIGCF_PRESENT | DIGCF_ALLCLASSES);
     if (deviceInfoSet == INVALID_HANDLE_VALUE) {
-        return "0";
+		return zero;
     }
 
     deviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
@@ -49,7 +50,7 @@ const char* GetSerialPortByVidPid(const char* vid, const char* pid) {
     }
 
     SetupDiDestroyDeviceInfoList(deviceInfoSet);
-    return "0";
+    return zero;
 }
 
 // Global state
@@ -79,21 +80,21 @@ BOOL open_port()
     dcb.ByteSize = 8; // 设置数据位为8
     dcb.Parity = NOPARITY; // 设置无奇偶校验
     dcb.StopBits = ONESTOPBIT; // 设置停止位为1
+	dcb.fRtsControl = RTS_CONTROL_DISABLE;
+	dcb.fOutxCtsFlow = FALSE;
     SetCommState(hPort, &dcb);
 
     // 获取串口超时
     GetCommTimeouts(hPort, &timeouts);
 
     // 设置串口超时
-    timeouts.ReadIntervalTimeout = 1; // 设置读取间隔超时为1毫秒
+    
+	timeouts.ReadIntervalTimeout = 1; // 设置读取间隔超时为1毫秒
     timeouts.ReadTotalTimeoutConstant = 5; // 设置读取总超时常量为5毫秒
     timeouts.ReadTotalTimeoutMultiplier = 1; // 设置读取总超时乘数为1毫秒
     timeouts.WriteTotalTimeoutConstant = 100; // 设置写入总超时常量为100毫秒
     timeouts.WriteTotalTimeoutMultiplier = 10; // 设置写入总超时乘数为10毫秒
     SetCommTimeouts(hPort, &timeouts);
-	EscapeCommFunction(hPort,5); //发送DTR信号
-	//EscapeCommFunction(hPort,3); //发送RTS信号
-    // 返回成功
     return TRUE;
 }
 
@@ -182,6 +183,7 @@ uint8_t serial_read_cmd(slider_packet_t *reponse){
 	uint8_t c;
 	COMSTAT comStat;
 	DWORD   dwErrors = 0;
+	PurgeComm(hPort, PURGE_RXCLEAR);
 	while(serial_read1(&c)){
 		if(c == 0xff){
 			package_init(reponse);
@@ -215,15 +217,17 @@ uint8_t serial_read_cmd(slider_packet_t *reponse){
 		}
 		reponse->data[rep_size] = c;
 		checksum += c;
-		if ((rep_size == reponse->size + 3) || (rep_size >256) ){
+		if ((rep_size == reponse->size + 3) || (rep_size >34) ){
 			return reponse->cmd;
 		}
 		rep_size++;
 	}
 	if (!GetCommState(hPort, &dcb)) {
     // 串口已断开
-	return 0xff;
+	//printf("rff/n");
+		return 0xff;
 	}
+	//printf("rfe/n");
 	return 0xfe;
 }
 

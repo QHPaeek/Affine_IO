@@ -9,45 +9,59 @@
 #include <ctype.h>
 #include "mai2io.h"
 #include "serial.h"
+#define DEBUG
 
+static char* Vid = "VID_AFF1";
+static char* Pid_1p = "PID_52A5";
 uint16_t player1,player2;
 HANDLE hPort; // 串口句柄
 extern HANDLE hPort1; // 串口句柄
 extern HANDLE hPort2; // 串口句柄
+extern char comPort1[13];
 
 void main(){
-    mai2_io_init();
 
-        uint8_t c;
+    uint8_t c;
 
-        //hPort = CreateFile("\\\\.\\COM11", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-        // open_port(&hPort,"\\\\.\\COM11");
-        while(1){
-        // if (hPort == INVALID_HANDLE_VALUE){
-        //     printf("open failed\n");
-        //         //If not success full display an Error
-        //     DWORD dwError = GetLastError();
-        //     switch (dwError) {
-        //         case ERROR_FILE_NOT_FOUND:
-        //             printf("ERROR: Handle was not attached. Reason: COM12 not available.\n");
-        //             break;
-        //         case ERROR_ACCESS_DENIED:
-        //             printf("ERROR: Access denied. Another program might be using the port.\n");
-        //             break;
-        //         case ERROR_GEN_FAILURE:
-        //             printf("ERROR: General failure. There might be a hardware issue.\n");
-        //             break;
-        //         default:
-        //             printf("ERROR: Unknown error occurred. Error code: %lu\n", dwError);
-        //             break;
-        //     }
-        // }else{
-        //     serial_read1(&hPort,&c);
-        //     printf("%x",c);
-        // }
-        mai2_io_poll();
-        mai2_io_get_gamebtns(&player1, &player2);
-        printf("%d\n",player1);
-        Sleep(1);
+    //hPort = CreateFile("\\\\.\\COM11", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    // open_port(&hPort,"\\\\.\\COM11");
+    while(hPort1 == NULL || hPort1 == INVALID_HANDLE_VALUE){
+        close_port(&hPort1);
+        strncpy(comPort1,GetSerialPortByVidPid(Vid,Pid_1p),6);
+        if(comPort1[0] == 0){
+            int port_num = 11;
+            snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
+            #ifdef DEBUG
+            printf("Affine IO:1P comPort1:");
+            printf(comPort1);
+            printf("\n");
+            #endif
+        }else if(comPort1[4] == 0){
+
+            #ifdef DEBUG
+        printf("Affine IO:1P comPort1:");
+        printf(comPort1);
+        printf("\n");
+        #endif
+        }else if(comPort1[5] == 0){
+            int port_num = (comPort1[3]-48)*10 + (comPort1[4]-48);
+            snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
+            #ifdef DEBUG
+        printf("Affine IO:1P comPort1:");
+        printf(comPort1);
+        printf("\n");
+        #endif
+        }else{
+            int port_num = (comPort1[3]-48)*100 + (comPort1[4]-48)*10 + (comPort1[5]-48);
+            snprintf(comPort1, 11, "\\\\.\\COM%d", port_num);
+            #ifdef DEBUG
+        printf("Affine IO:1P comPort1:");
+        printf(comPort1);
+        printf("\n");
+        #endif
+        }
+        open_port(&hPort1,comPort1);
+        Sleep(1000);
     }
+    Sleep(10000);
 }

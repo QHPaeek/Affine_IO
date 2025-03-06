@@ -12,7 +12,9 @@
 uint8_t Air_key_Status;
 uint8_t LED_status;
 uint8_t Serial_CMD_Flag;
-extern char comPort[6];
+extern char comPort[13];
+extern HANDLE hPort; // 串口句柄
+extern DCB dcb; // 串口参数结构体
 char* vid = "VID_AFF1";
 char* pid = "PID_52A4";
 
@@ -78,13 +80,20 @@ HRESULT chuni_io_slider_init(void)
 {
 	// Open ports
     memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-    if(*comPort == 0x48){ //找不到对应设备会返回“0”
+    if(comPort[5] != 0){
+        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+    }else if(comPort[4] != 0){
+        int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
+        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+    }else{
         char* default_comPort = "COM1";
         memcpy(comPort,default_comPort,5);
     }
     open_port();
     return S_OK;
 }
+
 
 void chuni_io_slider_start(chuni_io_slider_callback_t callback)
 {
@@ -166,6 +175,7 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
 	// }
     package_init(&reponse);	
     while (!chuni_io_slider_stop_flag) {
+        SetThreadExecutionState(1);
         switch (serial_read_cmd(&reponse)) {
 		    case SLIDER_CMD_AUTO_SCAN:
 			    memcpy(pressure, reponse.pressure, 32);
@@ -194,7 +204,13 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                 while(!open_port()){
                     close_port();
                     memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-                    if(*comPort == 0x48){ //找不到对应设备会返回“0”
+                    if(comPort[5] != 0){
+                        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+                        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+                    }else if(comPort[4] != 0){
+                        int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
+                        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+                    }else{
                         char* default_comPort = "COM1";
                         memcpy(comPort,default_comPort,5);
                     }

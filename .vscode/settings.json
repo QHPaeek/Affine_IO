@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "stdint.h": "c",
+        "windows.h": "c",
+        "random": "c"
+    },
+    "cmake.sourceDirectory": "D:/segatool/segaio/affineio/mai2io/cJSON"
+}

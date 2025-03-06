@@ -10,7 +10,7 @@
 
 #pragma comment(lib, "setupapi.lib")
 
-char comPort[6] = {0};
+char comPort[13];
 
 const char* GetSerialPortByVidPid(const char* vid, const char* pid) {
     HDEVINFO deviceInfoSet;
@@ -119,7 +119,7 @@ BOOL open_port()
     timeouts.WriteTotalTimeoutConstant = 100; // 设置写入总超时常量为100毫秒
     timeouts.WriteTotalTimeoutMultiplier = 10; // 设置写入总超时乘数为10毫秒
     SetCommTimeouts(hPort, &timeouts);
-	EscapeCommFunction(hPort,5); //发送DTR信号
+	EscapeCommFunction(hPort,SETDTR); //发送DTR信号
 	//EscapeCommFunction(hPort,3); //发送RTS信号
     // 返回成功
     return TRUE;

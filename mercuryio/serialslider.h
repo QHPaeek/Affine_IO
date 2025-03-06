@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 
-#define BUFSIZE 1024
+#define BUFSIZE 128
 #define CMD_TIMEOUT 3000
 
 typedef enum slider_cmd {
@@ -29,8 +29,11 @@ typedef union slider_packet {
 		uint8_t cmd;
 		uint8_t size;
 		union {
-			uint8_t leds[96];
-			uint8_t pressure[240];
+			struct{
+				uint8_t board_no;
+				uint8_t leds[60];
+			};
+			uint8_t cell[30];
 		};
 	};
 	uint8_t data[BUFSIZE];
