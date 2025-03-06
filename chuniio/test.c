@@ -60,6 +60,7 @@ int main() {
         return 1;
     }
     memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
+
     if(*comPort == 0x48){
         char* default_comPort = "COM1";
         memcpy(comPort,default_comPort,5);
