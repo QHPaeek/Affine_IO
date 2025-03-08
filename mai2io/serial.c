@@ -8,7 +8,7 @@
 
 #pragma comment(lib, "setupapi.lib")
 
-#define DEBUG
+//#define DEBUG
 #define READ_BUF_SIZE 256
 #define READ_TIMEOUT 500
 char comPort1[13]; //串口号

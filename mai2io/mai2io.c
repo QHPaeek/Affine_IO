@@ -7,18 +7,25 @@
 #include "serial.h"
 #include "dprintf.h"
 
+#include <stdatomic.h>
+
 #define ARRAY_LENGTH 34
 #define DEFAULT_VALUE 128
 
-#define DEBUG
+#define SHM_NAME_1   TEXT("mai_io_shm_1")
+#define SHM_NAME_2   TEXT("mai_io_shm_2")
+#define ARRAY_SIZE 2
+
+//#define DEBUG
 
 extern char comPort1[13]; //串口号
 extern char comPort2[13]; //串口号
 extern HANDLE hPort1; // 串口句柄
 extern HANDLE hPort2; // 串口句柄
-static uint8_t opts1 = 0;
-static uint8_t opts2 = 0;
-static uint8_t p1 = 0,p2 = 0;
+volatile uint8_t fuckkkkkkkkkkk;
+volatile uint8_t opts2;
+volatile uint8_t p1 = 0;
+volatile uint8_t p2 = 0;
 static uint8_t touch_threshold[34] = {0};
 static uint8_t FET_led[3];
 static uint8_t serial_stop_flag_1 = 1;
@@ -35,6 +42,14 @@ static HANDLE mai2_io_touch_2p_thread;
 static bool mai2_io_touch_2p_stop_flag;
 
 static uint8_t thread_flag = 0;
+
+static uint8_t mai2_opbtn;
+static bool mai2_io_coin;
+
+static HANDLE h_exMapFile1;
+static HANDLE h_exMapFile2;
+static uint8_t* mai_io_btn_1;
+static uint8_t* mai_io_btn_2;
 
 uint16_t mai2_io_get_api_version(void)
 {
@@ -53,19 +68,40 @@ HRESULT mai2_io_init(void)
 
 HRESULT mai2_io_poll(void)
 {  
-    #ifdef DEBUG
-    dprintf("Affine IO:mai2_io_poll");
-    #endif
+    mai2_opbtn = 0;
+    if (h_exMapFile1 == NULL) {
+        mai_io_btn_1 = NULL;
+        h_exMapFile1 = OpenFileMapping(FILE_MAP_ALL_ACCESS, FALSE, SHM_NAME_1);
+    }
+    if(h_exMapFile1 != NULL){
+        if(mai_io_btn_1 == NULL){
+            mai_io_btn_1 = (uint8_t*)MapViewOfFile(h_exMapFile1, FILE_MAP_ALL_ACCESS, 0, 0, ARRAY_SIZE);
+        }
+    }
+    if (h_exMapFile2 == NULL) {
+        mai_io_btn_2 = NULL;
+        h_exMapFile2 = OpenFileMapping(FILE_MAP_ALL_ACCESS, FALSE, SHM_NAME_2);
+    }
+    if(h_exMapFile2 != NULL){
+        if(mai_io_btn_2 == NULL){
+            mai_io_btn_2 = (uint8_t*)MapViewOfFile(h_exMapFile2, FILE_MAP_ALL_ACCESS, 0, 0, ARRAY_SIZE);
+        }
+    }
+    if(mai_io_btn_1 != NULL){
+        p1 =  mai_io_btn_1[0];
+        mai2_opbtn |=  mai_io_btn_1[1];
+    }
+    if(mai_io_btn_2 != NULL){
+        p2 =  mai_io_btn_1[0];
+        mai2_opbtn |=  mai_io_btn_2[1];
+    }
     return S_OK;
 }
 
 void mai2_io_get_opbtns(uint8_t *opbtn){
     if (opbtn != NULL) {
-        *opbtn = opts1;
+        *opbtn = mai2_opbtn;
     }
-    #ifdef DEBUG
-    dprintf("Affine IO:opbtn:%x\n",*opbtn);
-    #endif
 }
 
 void mai2_io_get_gamebtns(uint16_t *player1, uint16_t *player2){
@@ -76,9 +112,9 @@ void mai2_io_get_gamebtns(uint16_t *player1, uint16_t *player2){
     if (player2 != NULL) {
         *player2 = p2;
     }
-    #ifdef DEBUG
-    dprintf("Affine IO:player1:%x,player2:%x\n",*player1,*player2);
-    #endif
+    // #ifdef DEBUG
+    // dprintf("Affine IO:player1:%x,player2:%x\n",*player1,*player2);
+    // #endif
 }
 
 HRESULT mai2_io_touch_init(mai2_io_touch_callback_t callback){
@@ -116,6 +152,12 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
     uint8_t state[7] = {0, 0, 0, 0, 0, 0, 0};
     package_init(&response1);	
     char comPort[13];
+    uint8_t* mai_io_btn; 
+
+    HANDLE hMapFile = CreateFileMapping(INVALID_HANDLE_VALUE,NULL,PAGE_READWRITE,0,ARRAY_SIZE,SHM_NAME_1);
+    if (hMapFile != NULL) {
+        mai_io_btn = (uint8_t*)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, ARRAY_SIZE);
+    }
 
     memcpy(comPort,GetSerialPortByVidPid(Vid,Pid_1p),6);
 
@@ -139,16 +181,22 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
     open_port(&hPort1,comPort);
     while (!mai2_io_touch_1p_stop_flag) {
         switch (serial_read_cmd(hPort1,&response1)) {
-		    case SERIAL_CMD_AUTO_SCAN:
-                // #ifdef DEBUG
-                // dprintf("Affine IO:Auto Scan:%02x\n",response1.io_status);
-                // #endif
+		    case SERIAL_CMD_AUTO_SCAN:{
 			    memcpy(state, response1.touch, 7);
-                p1 = response1.key_status;
-                opts1 = response1.io_status; 
+                //p1 = response1.key_status;
+                if (mai_io_btn != NULL) {
+                    mai_io_btn[0] = response1.key_status;
+                    mai_io_btn[1] = response1.io_status;
+                }
+                //atomic_store_explicit(&fuckkkkkkkkkkk,  response1.io_status, memory_order_release);
+                //opts1 = response1.io_status;  
+                // #ifdef DEBUG
+                // dprintf("Affine IO:Auto Scan:%02x\n",opts1);
+                // #endif
                 package_init(&response1);
                 callback(1,state);
 			    break;
+            }
             case 0xff:{
                 #ifdef DEBUG
                 dprintf("Affine IO:1p port error\n");
@@ -188,6 +236,12 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
         }
     }
     CloseHandle(hPort1);
+    if (mai_io_btn != NULL) {
+        mai_io_btn[0] = 0;
+        mai_io_btn[1] = 0;
+    }
+    UnmapViewOfFile(mai_io_btn);
+    CloseHandle(hMapFile);
 }
 
 static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
@@ -199,6 +253,12 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
     uint8_t state[7] = {0, 0, 0, 0, 0, 0, 0};
     package_init(&response2);	
     char comPort[13];
+    uint8_t* mai_io_btn; 
+
+    HANDLE hMapFile = CreateFileMapping(INVALID_HANDLE_VALUE,NULL,PAGE_READWRITE,0,ARRAY_SIZE,SHM_NAME_2);
+    if (hMapFile != NULL) {
+        mai_io_btn = (uint8_t*)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, ARRAY_SIZE);
+    }
     memcpy(comPort,GetSerialPortByVidPid(Vid,Pid_2p),6);
     if(comPort[0] == 0){
         int port_num = 11;
@@ -222,8 +282,10 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
         switch (serial_read_cmd(hPort2,&response2)) {
 		    case SERIAL_CMD_AUTO_SCAN:
 			    memcpy(state, response2.touch, 7);
-                p2 = response2.key_status;
-                opts2 = response2.io_status;
+                if (mai_io_btn != NULL) {
+                    mai_io_btn[0] = response2.key_status;
+                    mai_io_btn[1] = response2.io_status;
+                }
                 package_init(&response2);
                 callback(2,state);
 			    break;
@@ -266,6 +328,12 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
         }
     }
     CloseHandle(hPort2);
+    if (mai_io_btn != NULL) {
+        mai_io_btn[0] = 0;
+        mai_io_btn[1] = 0;
+    }
+    UnmapViewOfFile(mai_io_btn);
+    CloseHandle(hMapFile);
 }
 
 HRESULT mai2_io_led_init(void){
