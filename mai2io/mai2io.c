@@ -92,7 +92,7 @@ HRESULT mai2_io_poll(void)
         mai2_opbtn |=  mai_io_btn_1[1];
     }
     if(mai_io_btn_2 != NULL){
-        p2 =  mai_io_btn_1[0];
+        p2 =  mai_io_btn_2[0];
         mai2_opbtn |=  mai_io_btn_2[1];
     }
     return S_OK;
@@ -297,7 +297,7 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
                     memset(comPort,0,13);
                     while(hPort2 == NULL || hPort2 == INVALID_HANDLE_VALUE){
                         CloseHandle(hPort2);
-                        strncpy(comPort,GetSerialPortByVidPid(Vid,Pid_1p),6);
+                        strncpy(comPort,GetSerialPortByVidPid(Vid,Pid_2p),6);
                         if(comPort[0] == 0){
                             int port_num = 11;
                             snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
