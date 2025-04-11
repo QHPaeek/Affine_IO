@@ -179,32 +179,23 @@ BOOL serial_read1(HANDLE hPortx,uint8_t *result){
 	
 }
 
-uint8_t serial_read_cmd(HANDLE hPortx,serial_packet_t *request){
+uint8_t serial_read_cmd(HANDLE hPortx,serial_packet_t *reponse){
 	uint8_t checksum = 0;
 	uint8_t rep_size = 0;
 	BOOL ESC = FALSE;
 	uint8_t c;
+	COMSTAT comStat;
+	DWORD   dwErrors = 0;
 	while(serial_read1(hPortx,&c)){
 		if(c == 0xff){
-			package_init(request);
+			package_init(reponse);
 			rep_size = 0;
-			request->syn = c;
+			reponse->syn = c;
 			ESC = FALSE;
 			checksum += 0xff;
 			continue;
 			}
-		if(request->syn != 0xff){
-			continue;
-		}
-		if(request->cmd == 0){
-			request->cmd = c;
-			checksum += request->cmd;
-			continue;
-		}
-		if(rep_size == 0){
-			request->size = c;
-			rep_size = 3;
-			checksum += request->size;
+		if(reponse->syn != 0xff){
 			continue;
 		}
 		if(c == 0xfd){
@@ -215,18 +206,28 @@ uint8_t serial_read_cmd(HANDLE hPortx,serial_packet_t *request){
 			c ++;
 			ESC = FALSE;
 		}
-		request->data[rep_size] = c;
+		if(reponse->cmd == 0){
+			reponse->cmd = c;
+			checksum += reponse->cmd;
+			continue;
+		}
+		if(rep_size == 0){
+			reponse->size = c;
+			rep_size = 3;
+			checksum += reponse->size;
+			continue;
+		}
+		reponse->data[rep_size] = c;
 		checksum += c;
-		if ((rep_size == request->size + 3) || (rep_size > 64) ){
-			return request->cmd;
+		if ((rep_size == reponse->size + 3) || (rep_size >128) ){
+			return reponse->cmd;
 		}
 		rep_size++;
 	}
-	DCB dcb = { 0 };
-    dcb.DCBlength = sizeof(DCB);
-    if (!GetCommState(hPortx, &dcb)) {
-        return 0xff;
-    }
+	if (!GetCommState(hPortx, &dcb)) {
+    // 串口已断开
+	return 0xff;
+	}
 	return 0xfe;
 }
 
@@ -239,15 +240,15 @@ void serial_heart_beat(HANDLE hPortx,serial_packet_t *rsponse){
 	//Sleep(3);
 }
 
-void serial_change_touch_threshold(HANDLE hPortx,serial_packet_t *rsponse,uint8_t *touch_threshold){
-	package_init(rsponse);
-	rsponse->syn = 0xff;
-	rsponse->cmd = SERIAL_CMD_CHANGE_TOUCH_THRESHOLD;
-	rsponse->size = 34;
-	memcpy(rsponse->threshold,touch_threshold,34);
-	serial_writeresp(hPortx,rsponse);
-	//Sleep(3);
-}
+// void serial_change_touch_threshold(HANDLE hPortx,serial_packet_t *rsponse,uint8_t *touch_threshold){
+// 	package_init(rsponse);
+// 	rsponse->syn = 0xff;
+// 	rsponse->cmd = SERIAL_CMD_CHANGE_TOUCH_THRESHOLD;
+// 	rsponse->size = 34;
+// 	memcpy(rsponse->threshold,touch_threshold,34);
+// 	serial_writeresp(hPortx,rsponse);
+// 	//Sleep(3);
+// }
 
 void serial_scan_start(HANDLE hPortx,serial_packet_t *rsponse){
 	package_init(rsponse);
