@@ -1,0 +1,7 @@
+目前affineio均具有使用setupapi通过VID\PID自动查找USB设备对应串口号的功能。
+
+然而，在某些精简版的windows镜像上，这种方法可能会产生无法预计的错误。后缀为legacy的dll为不包含使用setupapi自动查找串口号的版本。
+
+chuniio_affine_legacy.dll会固定尝试打开COM1端口。
+
+

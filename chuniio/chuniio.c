@@ -6,7 +6,6 @@
 
 #include "chuniio.h"
 #include "config.h"
-
 #include "serialslider.h"
 
 uint8_t Air_key_Status;
@@ -80,15 +79,18 @@ HRESULT chuni_io_slider_init(void)
 {
 	// Open ports
     memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-    if(comPort[5] != 0){
-        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
-        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
-    }else if(comPort[4] != 0){
+
+    if(comPort[0] == 0){
+        int port_num = 1;
+        snprintf(comPort, 4, "COM%d", port_num);
+    }else if(comPort[4] == 0){
+    }else if(comPort[5] == 0){
         int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
         snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
     }else{
-        char* default_comPort = "COM1";
-        memcpy(comPort,default_comPort,5);
+        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+        
     }
     open_port();
     return S_OK;
@@ -143,17 +145,15 @@ void chuni_io_slider_set_leds(const uint8_t *rgb)
 
 void chuni_io_led_set_colors(uint8_t board,uint8_t *rgb_raw)
 {
-    // uint8_t air_rgb[9];
-    // if(board == 0){
-    //     for(uint8_t i=0;i<9;i++){
-    //         air_rgb[i] = rgb_raw[150+i];
-    //     }
-    // }
-    // else if(board == 1){
-    //     for(uint8_t i=0;i<9;i++){
-    //         air_rgb[i] = rgb_raw[180+i];
-    //     }
-    // }
+    uint8_t air_rgb[3];
+    if(board == 0){
+        air_rgb[0] = rgb_raw[152];
+        air_rgb[1] = rgb_raw[150];
+        air_rgb[2] = rgb_raw[151];
+
+        slider_send_air_leds(air_rgb);
+        //dprintf("AffineIO:Air LED%02x,%02x,%02x",rgb_raw[150],rgb_raw[150+1],rgb_raw[150+2]);
+    }
 }
 
 HRESULT chuni_io_led_init(void)
@@ -204,15 +204,17 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                 while(!open_port()){
                     close_port();
                     memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-                    if(comPort[5] != 0){
-                        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
-                        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
-                    }else if(comPort[4] != 0){
+                    if(comPort[0] == 0){
+                        int port_num = 1;
+                        snprintf(comPort, 4, "COM%d", port_num);
+                    }else if(comPort[4] == 0){
+                    }else if(comPort[5] == 0){
                         int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
                         snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
                     }else{
-                        char* default_comPort = "COM1";
-                        memcpy(comPort,default_comPort,5);
+                        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+                        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+                        
                     }
                     memset(pressure,0, 32);
                     callback(pressure);
@@ -224,6 +226,7 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void* param)
                 callback(pressure);
                 break;
             default:
+                callback(pressure);
                 break;
         }
         // if (!IsSerialPortOpen()) {

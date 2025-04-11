@@ -377,22 +377,12 @@ void slider_send_leds(const uint8_t *rgb){
 	//Sleep(3);
 }
 
-void slider_send_air_leds_left(const uint8_t *rgb){
+void slider_send_air_leds(const uint8_t *rgb){
 	package_init(&request);
 	request.syn = 0xff;
-	request.cmd = SLIDER_CMD_SET_AIR_LED_LEFT;
-	request.size = 9;
-	memcpy(request.air_leds, rgb, 9);
-	sliderserial_writeresp(&request);
-	//Sleep(1);
-}
-
-void slider_send_air_leds_right(const uint8_t *rgb){
-	package_init(&request);
-	request.syn = 0xff;
-	request.cmd = SLIDER_CMD_SET_AIR_LED_RIGHT;
-	request.size = 9;
-	memcpy(request.air_leds, rgb, 9);
+	request.cmd = SLIDER_CMD_SET_AIR_LED;
+	request.size = 3;
+	memcpy(request.air_leds, rgb, 3);
 	sliderserial_writeresp(&request);
 	//Sleep(1);
 }

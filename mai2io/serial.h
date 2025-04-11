@@ -14,10 +14,14 @@
 #define CMD_TIMEOUT 3000
 
 typedef enum serial_cmd {
-	SERIAL_CMD_AUTO_SCAN = 0x02,
+	SERIAL_CMD_AUTO_SCAN = 0x01,
+	SERIAL_CMD_LED = 0x02,
 	SERIAL_CMD_SCAN_START = 0x03,
 	SERIAL_CMD_SCAN_STOP = 0x04,
-	SERIAL_CMD_CHANGE_TOUCH_THRESHOLD = 0x05,
+	SERIAL_CMD_READ_MONO_THRESHOLD = 0x5,
+	SERIAL_CMD_WRITE_MONO_THRESHOLD = 0x6,
+	SERIAL_CMD_READ_TOUCH_SHEET = 0x7,
+	SERIAL_CMD_WRITE_TOUCH_SHEET = 0x8,
 	SERIAL_CMD_RESET = 0x10,
 	SERIAL_CMD_HEART_BEAT = 0x11,
 	SERIAL_CMD_GET_BOARD_INFO = 0xF0
@@ -30,7 +34,7 @@ typedef union serial_packet {
 		uint8_t size;
 		union{
 			struct {				
-				uint8_t key_status;
+				uint8_t key_status[2];
 				uint8_t io_status;
 				uint8_t touch[7];
 			};
@@ -38,8 +42,13 @@ typedef union serial_packet {
 				uint8_t button_led[24];
 				uint8_t fet_led[3];
 			};
-			uint8_t threshold[34];
+			struct{
+				uint8_t channel;
+				uint8_t threshold[2];
+			};
+			uint8_t touch_sheet[34];
 			uint8_t raw_value[34];
+			uint8_t status;
 		};
 	};
 	uint8_t data[BUFSIZE];
@@ -65,7 +74,7 @@ void close_port(HANDLE *hPortx);
 void package_init(serial_packet_t *rsponse);
 uint8_t serial_read_cmd(HANDLE hPortx,serial_packet_t *request);
 void serial_heart_beat(HANDLE hPortx,serial_packet_t *rsponse);
-void serial_change_touch_threshold(HANDLE hPortx,serial_packet_t *rsponse,uint8_t *touch_threshold);
+// void serial_change_touch_threshold(HANDLE hPortx,serial_packet_t *rsponse,uint8_t *touch_threshold);
 void serial_scan_start(HANDLE hPortx,serial_packet_t *rsponse);
 void serial_scan_stop(HANDLE hPortx,serial_packet_t *rsponse);
 char* GetSerialPortByVidPid(const char* vid, const char* pid);
