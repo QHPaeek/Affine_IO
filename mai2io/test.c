@@ -5,6 +5,16 @@
 #include "serial.h"
 #include "dprintf.h"
 
+// 外部变量
+extern char comPort1[13];
+extern char comPort2[13];
+extern HANDLE hPort1;
+extern HANDLE hPort2;
+extern serial_packet_t response1;
+extern serial_packet_t response2;
+extern void package_init(serial_packet_t *response);
+extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
+
 // 调试开关
 // #define DEBUG
 
@@ -63,7 +73,7 @@ uint8_t prev_player1Buttons = 0;
 uint8_t prev_player2Buttons = 0;
 uint8_t prev_opButtons = 0;
 
-// 添加存储原始触摸值的数组
+// 原始值数组
 uint8_t p1RawValue[34] = {0};
 uint8_t p2RawValue[34] = {0};
 
@@ -75,7 +85,7 @@ uint8_t fetLEDs[3] = {0};
 uint16_t touchThreshold[TOUCH_REGIONS] = {0};
 
 // 缓冲区状态
-bool dataChanged = true; // 首次运行时需要强制刷新
+bool dataChanged = true; 
 
 // 函数声明
 void DisplayHeader(DeviceState state1p, DeviceState state2p);
@@ -156,17 +166,19 @@ int main()
     else if (comPort1[4] == 0)
     {
         // 端口号小于10
+        int port_num = (comPort1[3] - '0');
+        snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
     }
     else if (comPort1[5] == 0)
     {
         // 两位数端口号
-        int port_num = (comPort1[3] - 48) * 10 + (comPort1[4] - 48);
+        int port_num = (comPort1[3] - '0') * 10 + (comPort1[4] - '0');
         snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
     }
     else
     {
         // 三位数端口号
-        int port_num = (comPort1[3] - 48) * 100 + (comPort1[4] - 48) * 10 + (comPort1[5] - 48);
+        int port_num = (comPort1[3] - '0') * 100 + (comPort1[4] - '0') * 10 + (comPort1[5] - '0');
         snprintf(comPort1, 11, "\\\\.\\COM%d", port_num);
     }
 
@@ -259,7 +271,7 @@ int main()
         }
 
         // 设置刷新率
-        Sleep(1); // 增加到50ms，降低频闪
+        Sleep(1); 
     }
 
     // 清理
@@ -834,9 +846,9 @@ void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8])
 
     memset(touchMatrix, 0, sizeof(bool) * 8 * 8); // 清零矩阵
 
-    for (int y = 0; y < 8; y++)
+    for (int y = 0; y < 8 && byteIndex < 7; y++)
     {
-        for (int x = 0; x < 8; x++)
+        for (int x = 0; x < 8 && byteIndex < 7; x++)
         {
             // 每个字节存储多个触摸点状态
             if (bitIndex >= 8)
@@ -849,7 +861,6 @@ void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8])
 
             // 检查对应位是否为1
             touchMatrix[y][x] = (state[byteIndex] & (1 << bitIndex)) != 0;
-
             bitIndex++;
         }
         if (byteIndex >= 7)
@@ -880,7 +891,7 @@ void UpdateDeviceState()
         {
             // 发送心跳并检查响应
             serial_heart_beat(hPort1, &response1);
-            Sleep(5); // 给设备一点时间响应
+            Sleep(20); // 给设备一点时间响应
 
             // 尝试读取响应
             if (serial_read_cmd(hPort1, &response1) == 0xff)
@@ -895,7 +906,7 @@ void UpdateDeviceState()
         {
             // 发送心跳并检查响应
             serial_heart_beat(hPort2, &response2);
-            Sleep(5); // 给设备一点时间响应
+            Sleep(20); // 给设备一点时间响应
 
             // 尝试读取响应
             if (serial_read_cmd(hPort2, &response2) == 0xff)
@@ -951,15 +962,19 @@ void ReconnectDevices()
         else if (comPort1[4] == 0)
         {
             // 端口号小于10
+            int port_num = (comPort1[3] - '0');
+            snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
         }
         else if (comPort1[5] == 0)
         {
-            int port_num = (comPort1[3] - 48) * 10 + (comPort1[4] - 48);
+            // 两位数端口号
+            int port_num = (comPort1[3] - '0') * 10 + (comPort1[4] - '0');
             snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
         }
         else
         {
-            int port_num = (comPort1[3] - 48) * 100 + (comPort1[4] - 48) * 10 + (comPort1[5] - 48);
+            // 三位数端口号
+            int port_num = (comPort1[3] - '0') * 100 + (comPort1[4] - '0') * 10 + (comPort1[5] - '0');
             snprintf(comPort1, 11, "\\\\.\\COM%d", port_num);
         }
 
@@ -1027,7 +1042,6 @@ void UpdateTouchData()
             {
             case SERIAL_CMD_AUTO_SCAN:
                 memcpy(p1TouchState, response1.touch, 7);
-                // 同时复制 raw_value 数据
                 memcpy(p1RawValue, response1.raw_value, 34);
                 player1Buttons = response1.key_status;
                 opButtons = response1.io_status;
@@ -1035,73 +1049,15 @@ void UpdateTouchData()
                 dataUpdated = true;
                 break;
             case 0xff:
-                // 检测到串口错误，执行立即重连
-                // 清空数据
                 memset(p1TouchState, 0, sizeof(p1TouchState));
                 player1Buttons = 0;
-
-                // 更新UI状态
-                deviceState1p = DEVICE_WAIT;
-                dataChanged = true;
-
+                
                 // 关闭当前端口连接
                 close_port(&hPort1);
-
-                // 设置为等待状态并更新UI
+                
+                // 更新设备状态为等待状态
+                deviceState1p = DEVICE_WAIT;
                 dataChanged = true;
-
-                // 立即尝试重新连接（不等待下一个UpdateDeviceState周期）
-                memcpy(comPort1, GetSerialPortByVidPid(Vid, Pid_1p), 6);
-                if (comPort1[0] == 0)
-                {
-                    strcpy(comPort1, "\\\\.\\COM3");
-                }
-                else if (comPort1[4] == 0)
-                {
-                    // 端口号小于10
-                }
-                else if (comPort1[5] == 0)
-                {
-                    int port_num = (comPort1[3] - 48) * 10 + (comPort1[4] - 48);
-                    snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
-                }
-                else
-                {
-                    int port_num = (comPort1[3] - 48) * 100 + (comPort1[4] - 48) * 10 + (comPort1[5] - 48);
-                    snprintf(comPort1, 11, "\\\\.\\COM%d", port_num);
-                }
-
-                // 持续尝试重连，直到成功
-                int reconnectAttempts = 0;
-                while (!open_port(&hPort1, comPort1) && reconnectAttempts < 5) // 限制尝试次数避免无限循环
-                {
-                    reconnectAttempts++;
-                    // 再次关闭端口确保资源释放
-                    close_port(&hPort1);
-                    // 再次尝试获取COM端口
-                    memcpy(comPort1, GetSerialPortByVidPid(Vid, Pid_1p), 6);
-                    if (comPort1[0] == 0)
-                    {
-                        strcpy(comPort1, "\\\\.\\COM3");
-                    }
-                    Sleep(100); // 短暂等待后重试
-                }
-
-                // 检查是否已成功连接
-                if (reconnectAttempts < 5) // 成功连接
-                {
-                    deviceState1p = DEVICE_OK;
-                    dataChanged = true;
-
-                    // 启动扫描
-                    serial_scan_start(hPort1, &response1);
-                }
-                else // 连接失败
-                {
-                    // 如果尝试次数用完仍未连接，将状态设回FAIL以便下次UpdateDeviceState时再次尝试
-                    deviceState1p = DEVICE_FAIL;
-                    dataChanged = true;
-                }
                 break;
             default:
                 break;
@@ -1109,22 +1065,27 @@ void UpdateTouchData()
         }
     }
 
-    // 读取2P数据
+    // 读取2P数据 - 同样简化处理
     if (deviceState2p == DEVICE_OK)
     {
         switch (serial_read_cmd(hPort2, &response2))
         {
         case SERIAL_CMD_AUTO_SCAN:
             memcpy(p2TouchState, response2.touch, 7);
-            // 同时复制 raw_value 数据
             memcpy(p2RawValue, response2.raw_value, 34);
             player2Buttons = response2.key_status;
             opButtons |= response2.io_status;
             package_init(&response2);
             break;
         case 0xff:
-            // 串口错误
-            deviceState2p = DEVICE_FAIL;
+            memset(p2TouchState, 0, sizeof(p2TouchState));
+            player2Buttons = 0;
+            
+            // 关闭当前端口连接
+            close_port(&hPort2);
+            
+            // 更新设备状态
+            deviceState2p = DEVICE_WAIT;
             dataChanged = true;
             break;
         }
@@ -1325,7 +1286,12 @@ void ModifyThreshold()
     // 获取用户输入
     char input[20];
     fgets(input, sizeof(input), stdin);
-
+    
+    // 移除可能的换行符
+    size_t len = strlen(input);
+    if (len > 0 && input[len-1] == '\n')
+        input[len-1] = '\0';
+    
     // 解析输入
     char regionType;
     int regionNum, display_threshold;
@@ -1451,6 +1417,8 @@ void DisplayRawData(uint8_t *touchState, uint8_t *rawValue)
     for (int row = 0; row < rows && row * bytesPerRow < 34; row++)
     {
         SetCursorPosition(0, 24 + row);
+        ClearLine(24 + row); // 先清除行，再显示内容
+        
         int startByte = row * bytesPerRow;
         int endByte = min(startByte + bytesPerRow, 34); // 确保不超过34字节
 
