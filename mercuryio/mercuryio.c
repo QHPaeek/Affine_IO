@@ -77,16 +77,18 @@ void mercury_io_get_gamebtns(uint8_t *gamebtn)
 HRESULT mercury_io_touch_init(void)
 {
     // Open ports
-    memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-    if(comPort[5] != 0){
-        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
-        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
-    }else if(comPort[4] != 0){
+    strncpy(comPort,GetSerialPortByVidPid(vid,pid),6);
+    if(comPort[0] == 0){
+        int port_num = 20;
+        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+    }else if(comPort[4] == 0){
+    }else if(comPort[5] == 0){
         int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
         snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
     }else{
-        char* default_comPort = "COM1";
-        memcpy(comPort,default_comPort,5);
+        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+        
     }
     open_port();
     return S_OK;
@@ -149,16 +151,18 @@ static unsigned int __stdcall mercury_io_touch_thread_proc(void *ctx)
                 while(!open_port()){
                     close_port();
                     	// Open ports
-                    memcpy(comPort,GetSerialPortByVidPid(vid,pid),6);
-                    if(comPort[5] != 0){
-                        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
-                        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
-                    }else if(comPort[4] != 0){
+                    strncpy(comPort,GetSerialPortByVidPid(vid,pid),6);
+                    if(comPort[0] == 0){
+                        int port_num = 20;
+                        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+                    }else if(comPort[4] == 0){
+                    }else if(comPort[5] == 0){
                         int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
                         snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
                     }else{
-                        char* default_comPort = "COM1";
-                        memcpy(comPort,default_comPort,5);
+                        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+                        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+                        
                     }
                     open_port();
                     //memset(pressure,0, 32);
