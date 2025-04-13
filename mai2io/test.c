@@ -23,6 +23,9 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 #define BUTTONS_COUNT 9         // 按钮总数（+1）
 #define THRESHOLD_DEFAULT 32768 // 默认阈值（65535的一半，对应显示值50）
 
+// 版本号定义
+const char* VERSION = "v.EVALUATION";  // 添加版本号常量
+
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
 #define COLOR_GREEN (FOREGROUND_GREEN | FOREGROUND_INTENSITY)
@@ -363,7 +366,7 @@ void DisplayHeader(DeviceState state1p, DeviceState state2p)
 
     // 固定位置绘制头部信息
     SetCursorPosition(0, 0);
-    printf("Curva Test Tools v0.1");
+    printf("Curva Test Tools %s", VERSION);
 
     SetCursorPosition(0, 1);
     printf("Device State 1P: ");
@@ -1455,21 +1458,26 @@ uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
     response->channel = (uint8_t)index;
     serial_writeresp(hPort, response);
 
-    // 等待响应
+    // 使用多次迭代尝试读取响应
+    const int READ_ITERATIONS = 100;
     DWORD startTime = GetTickCount();
     uint8_t cmd;
-    while ((GetTickCount() - startTime) < 500)
-    { // 500ms超时
-        package_init(response);
-        cmd = serial_read_cmd(hPort, response);
-        if (cmd == SERIAL_CMD_READ_MONO_THRESHOLD)
+
+    while ((GetTickCount() - startTime) < 500) // 500ms超时
+    {
+        for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
         {
-            // 收到正确响应，处理大小端序
-            if (response->size >= 3 && response->channel == index)
+            package_init(response);
+            cmd = serial_read_cmd(hPort, response);
+            if (cmd == SERIAL_CMD_READ_MONO_THRESHOLD)
             {
-                // 根据协议，阈值为低字节在前，高字节在后
-                uint16_t value = (response->threshold[1] << 8) | response->threshold[0];
-                return value;
+                // 收到正确响应，处理大小端序
+                if (response->size >= 3 && response->channel == index)
+                {
+                    // 根据协议，阈值为低字节在前，高字节在后
+                    uint16_t value = (response->threshold[1] << 8) | response->threshold[0];
+                    return value;
+                }
             }
         }
         Sleep(1); // 避免CPU占用过高
@@ -1499,21 +1507,26 @@ bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index)
     response->threshold[1] = (value >> 8) & 0xFF;
     serial_writeresp(hPort, response);
 
-    // 等待响应
+    // 使用多次迭代尝试读取响应
+    const int READ_ITERATIONS = 100;
     DWORD startTime = GetTickCount();
     uint8_t cmd;
-    while ((GetTickCount() - startTime) < 1000)
-    { // 1000ms超时
-        package_init(response);
-        cmd = serial_read_cmd(hPort, response);
-        if (cmd == SERIAL_CMD_WRITE_MONO_THRESHOLD)
+
+    while ((GetTickCount() - startTime) < 1000) // 1000ms超时
+    {
+        for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
         {
-            // 验证响应是否为OK
-            if (response->size >= 1 && response->data[3] == 0x01)
+            package_init(response);
+            cmd = serial_read_cmd(hPort, response);
+            if (cmd == SERIAL_CMD_WRITE_MONO_THRESHOLD)
             {
-                return true;
+                // 验证响应是否为OK
+                if (response->size >= 1 && response->data[3] == 0x01)
+                {
+                    return true;
+                }
+                return false;
             }
-            return false;
         }
         Sleep(1); // 避免CPU占用过高
     }
@@ -1533,7 +1546,7 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response)
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
         touchThreshold[i] = ReadThreshold(hPort, response, i);
-        Sleep(20); 
+        Sleep(20);
     }
 }
 
@@ -1544,34 +1557,101 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
         return false;
     }
 
+    // 发送读取触摸映射表命令
     package_init(response);
     response->syn = 0xff;
     response->cmd = SERIAL_CMD_READ_TOUCH_SHEET;
-    response->size = 0x01; 
+    response->size = 0x01;
     response->data[3] = 0x00;
     serial_writeresp(hPort, response);
 
-    // 等待响应
+    // 接收数据变量
+    uint8_t buffer[TOUCH_REGIONS + 4] = {0}; // +4用于存储头部和校验和
+    int bytesReceived = 0;
+    bool headerReceived = false;
+    uint8_t cmd = 0;
+
+    // 循环读取直到超时或收到完整数据
     DWORD startTime = GetTickCount();
-    uint8_t cmd;
-    while ((GetTickCount() - startTime) < 500)
-    { 
-        package_init(response);
-        cmd = serial_read_cmd(hPort, response);
-        if (cmd == SERIAL_CMD_READ_TOUCH_SHEET)
+    DWORD currentTime;
+
+    do
+    {
+        currentTime = GetTickCount();
+
+        // 每次先尝试读取一个命令包
+        if (!headerReceived)
         {
-            if (response->size == 0x22)
+            package_init(response);
+            cmd = serial_read_cmd(hPort, response);
+
+            // 如果收到正确的命令码和数据长度
+            if (cmd == SERIAL_CMD_READ_TOUCH_SHEET && response->size == 0x22)
             {
+                // 修复偏移问题：确保正确复制所有34字节的实际数据
                 memcpy(touchSheet, response->touch_sheet, TOUCH_REGIONS);
                 return true;
             }
-            return false;
+
+            // 尝试逐字节接收
+            for (int i = 0; i < 200 && bytesReceived < TOUCH_REGIONS + 4; i++)
+            {
+                uint8_t byte;
+                DWORD bytesRead;
+
+                if (ReadFile(hPort, &byte, 1, &bytesRead, NULL) && bytesRead == 1)
+                {
+                    // 处理数据帧头部
+                    if (bytesReceived == 0 && byte == 0xFF)
+                    {
+                        buffer[bytesReceived++] = byte;
+                    }
+                    else if (bytesReceived == 1 && byte == SERIAL_CMD_READ_TOUCH_SHEET)
+                    {
+                        buffer[bytesReceived++] = byte;
+                    }
+                    else if (bytesReceived == 2 && byte == 0x22)
+                    {
+                        buffer[bytesReceived++] = byte;
+                        headerReceived = true;
+                    }
+                    // 如果已经接收到头部，继续接收数据体
+                    else if (headerReceived && bytesReceived < TOUCH_REGIONS + 4)
+                    {
+                        buffer[bytesReceived++] = byte;
+
+                        // 如果已接收到全部数据及校验和
+                        if (bytesReceived == TOUCH_REGIONS + 4)
+                        {
+                            // 确保仅复制34字节的映射数据，不包括校验和
+                            memcpy(touchSheet, &buffer[3], TOUCH_REGIONS);
+                            return true;
+                        }
+                    }
+                    // 重置如果接收到的不是期望的字节
+                    else if (bytesReceived < 3)
+                    {
+                        bytesReceived = 0;
+                    }
+                }
+                else
+                {
+                    break; // 无数据可读或读取错误，跳出内循环
+                }
+            }
         }
-        Sleep(1); 
+
+        Sleep(5); // 短暂等待，避免CPU占用过高
+
+    } while (currentTime - startTime < 2000);
+
+    if (headerReceived && bytesReceived >= TOUCH_REGIONS + 3)
+    {
+        memcpy(touchSheet, &buffer[3], TOUCH_REGIONS);
+        return true;
     }
 
-    // 超时或未收到正确响应
-    return false;
+    return false; // 超时或未接收到足够数据
 }
 
 bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
@@ -1589,21 +1669,26 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
     memcpy(response->touch_sheet, touchSheet, TOUCH_REGIONS);
     serial_writeresp(hPort, response);
 
-    // 等待响应
+    // 使用多次迭代尝试读取响应
+    const int READ_ITERATIONS = 100;
     DWORD startTime = GetTickCount();
     uint8_t cmd;
-    while ((GetTickCount() - startTime) < 1000)
-    { // 1000ms超时
-        package_init(response);
-        cmd = serial_read_cmd(hPort, response);
-        if (cmd == SERIAL_CMD_WRITE_TOUCH_SHEET)
+
+    while ((GetTickCount() - startTime) < 1000) // 1000ms超时
+    {
+        for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
         {
-            // 验证响应是否为OK
-            if (response->size >= 1 && response->data[3] == 0x01)
+            package_init(response);
+            cmd = serial_read_cmd(hPort, response);
+            if (cmd == SERIAL_CMD_WRITE_TOUCH_SHEET)
             {
-                return true;
+                // 验证响应是否为OK
+                if (response->size >= 1 && response->data[3] == 0x01)
+                {
+                    return true;
+                }
+                return false;
             }
-            return false;
         }
         Sleep(1); // 避免CPU占用过高
     }
@@ -1654,9 +1739,18 @@ void RemapTouchSheet()
         ClearLine(i);
     }
 
+    // 创建索引到区块标识符的映射
+    const char *blockLabels[TOUCH_REGIONS] = {
+        "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", // 0-7
+        "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", // 8-15
+        "C1", "C2",                                     // 16-17
+        "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", // 18-25
+        "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"  // 26-33
+    };
+
     // 显示当前映射
     SetCursorPosition(0, promptY);
-    printf("┌──────────────────────────────────── Curva Touch Sheet Mapping ──────────────────────────────────────┐");
+    printf("┌───────────────────────────────────── Curva Touch Sheet Mapping ─────────────────────────────────────┐");
     SetCursorPosition(0, promptY + 1);
     printf("│0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33│");
     SetCursorPosition(0, promptY + 2);
@@ -1665,7 +1759,11 @@ void RemapTouchSheet()
     printf("│");
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
-        printf("%-3d", touchSheet[i]);
+        if (touchSheet[i] < TOUCH_REGIONS) {
+            printf("%-3s", blockLabels[touchSheet[i]]);
+        } else {
+            printf("??"); 
+        }
     }
     printf("│");
     SetCursorPosition(0, promptY + 4);
@@ -1817,10 +1915,12 @@ void RemapTouchSheet()
     cursorInfo.bVisible = FALSE;
     SetConsoleCursorInfo(hConsole, &cursorInfo);
 
-    // 清除提示区域
-    for (int i = promptY; i < promptY + 6; i++)
+    for (int i = promptY; i < promptY + 8; i++)
     {
         ClearLine(i);
+        // 使用一个超长空白字符串确保行完全清除
+        SetCursorPosition(0, i);
+        printf("                                                                                                       ");
     }
 
     // 强制更新显示

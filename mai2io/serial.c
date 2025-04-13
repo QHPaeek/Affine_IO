@@ -159,7 +159,7 @@ BOOL send_data(HANDLE hPortx,int length,uint8_t *send_buffer)
 }
 
 void serial_writeresp(HANDLE hPortx, serial_packet_t *rsponse) {
-    // 修正校验和
+	// 计算校验和
     uint8_t checksum = rsponse->syn + rsponse->cmd + rsponse->size;
     uint8_t length = rsponse->size + 4;
     
@@ -169,6 +169,9 @@ void serial_writeresp(HANDLE hPortx, serial_packet_t *rsponse) {
     
     for (uint8_t i = 0; i < rsponse->size; i++) {
         checksum += rsponse->data[i+3];
+//        if ((rsponse->data[i+3] == 0xff) || (rsponse->data[i+3] == 0xfd)) {
+//            rsponse->data[i+3] = 0xfe;
+//        }
     }
     
     // 校验和自动截断为1字节（uint8_t类型）
