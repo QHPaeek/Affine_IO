@@ -8,6 +8,12 @@ Affine IO-Mai
 gcc -m64 -shared .\mai2io.c .\config.c .\serial.c .\dprintf.c -o mai2io_affine.dll
 ```
 
+编译测试exe程序：
+
+```
+gcc -m64 .\test.c .\serial.c .\dprintf.c -o curva_test.exe -lsetupapi
+```
+
 在Segatool中使用：
 
 ```
