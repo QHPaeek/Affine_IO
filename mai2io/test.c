@@ -51,7 +51,8 @@ bool isFirstConnection1p = TRUE;
 bool isFirstConnection2p = TRUE;
 bool ledButtonsTest = FALSE;
 bool ledControllerTest = FALSE;
-bool showRawData = FALSE;
+// bool showRawData = FALSE;
+bool remapTouchSheet = FALSE;
 bool usePlayer2 = FALSE; // 控制是否切换到2P模式
 HANDLE hConsole;
 int consoleWidth = 100;
@@ -77,6 +78,10 @@ uint8_t prev_opButtons = 0;
 uint8_t p1RawValue[34] = {0};
 uint8_t p2RawValue[34] = {0};
 
+uint8_t touchSheet[TOUCH_REGIONS] = {0};
+
+uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index);
+
 // LED状态
 uint8_t buttonLEDs[24] = {0};
 uint8_t fetLEDs[3] = {0};
@@ -85,7 +90,7 @@ uint8_t fetLEDs[3] = {0};
 uint16_t touchThreshold[TOUCH_REGIONS] = {0};
 
 // 缓冲区状态
-bool dataChanged = true; 
+bool dataChanged = true;
 
 // 函数声明
 void DisplayHeader(DeviceState state1p, DeviceState state2p);
@@ -104,8 +109,14 @@ void DisplayThresholds();
 void DisplayButtons();
 void ModifyThreshold();
 void InitThresholds();
-void SendThresholds(HANDLE hPort, serial_packet_t *response);
-void DisplayRawData(uint8_t *touchState, uint8_t *rawValue);
+bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index);
+// void SendThresholds(HANDLE hPort, serial_packet_t *response);
+// void DisplayRawData(uint8_t *touchState, uint8_t *rawValue);
+void ReadAllThresholds(HANDLE hPort, serial_packet_t *response);
+
+bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response);
+bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response);
+void RemapTouchSheet();
 
 bool IsDataChanged();
 void ClearLine(int line);
@@ -149,7 +160,7 @@ int main()
     // 清屏一次
     system("cls");
 
-    // 初始化阈值
+    // 初始化阈值为默认值（仅作为备份）
     InitThresholds();
 
     // 尝试打开串口连接
@@ -161,7 +172,7 @@ int main()
     if (comPort1[0] == 0)
     {
         // 如果无法通过VID/PID找到设备，使用默认COM端口
-        strcpy(comPort1, "\\\\.\\COM8");
+        strcpy(comPort1, "\\\\.\\COM11");
     }
     else if (comPort1[4] == 0)
     {
@@ -186,10 +197,15 @@ int main()
     {
         deviceState1p = DEVICE_OK;
         serial_scan_start(hPort1, &response1);
+
+        // 成功连接后读取当前阈值
+        ReadAllThresholds(hPort1, &response1);
+
+        ReadTouchSheet(hPort1, &response1);
     }
     else
     {
-        deviceState1p = DEVICE_WAIT; // 改为WAIT而不是FAIL
+        deviceState1p = DEVICE_WAIT;
     }
 
     // 尝试连接2P设备
@@ -197,7 +213,7 @@ int main()
     if (comPort2[0] == 0)
     {
         // 如果无法通过VID/PID找到设备，使用默认COM端口
-        strcpy(comPort2, "\\\\.\\COM9");
+        strcpy(comPort2, "\\\\.\\COM12");
     }
     else if (comPort2[4] == 0)
     {
@@ -271,7 +287,7 @@ int main()
         }
 
         // 设置刷新率
-        Sleep(1); 
+        Sleep(1);
     }
 
     // 清理
@@ -438,10 +454,10 @@ void DisplayMainWindow()
         printf("STOP   ");
     }
     SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf(" │    │  [F5] Modify Region Threshold  │   │ Select 1       ");
+    printf(" │    │  [F5] Modify Region Threshold  │   │ Select         ");
 
-    // 显示Select 1按钮状态
-    if (opButtons & (1 << 4))
+    // 显示Select 按钮状态
+    if ((usePlayer2 ? player2Buttons : player1Buttons) & (1 << 9))
     {
         SetConsoleTextAttribute(hConsole, COLOR_GREEN);
         printf("ON ");
@@ -468,24 +484,13 @@ void DisplayMainWindow()
         printf("STOP   ");
     }
     SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf(" │    │  [F6] Show Raw Touch Data  ");
+    printf(" │    │  [F6] Remap Touch Sheet       ");
 
-    // 显示原始数据状态
-    if (showRawData)
-    {
-        SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-        printf("ON ");
-    }
-    else
-    {
-        SetConsoleTextAttribute(hConsole, COLOR_RED);
-        printf("OFF");
-    }
     SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf(" │   │ Select 2       ");
+    printf(" │   │ Reserve        ");
 
-    // 显示Select 2按钮状态
-    if (opButtons & (1 << 5))
+    // 显示Reserve按钮状态
+    if (opButtons & (1 << 3))
     {
         SetConsoleTextAttribute(hConsole, COLOR_GREEN);
         printf("ON ");
@@ -554,18 +559,9 @@ void DisplayMainWindow()
     SetCursorPosition(0, 21);
     printf("└─────────────────────────────────────────────────────────────────────┘        └──────────────────────┘");
 
-    // 如果启用显示原始数据，在底部固定区域显示
-    if (showRawData)
+    for (int i = 23; i < 33; i++)
     {
-        DisplayRawData(usePlayer2 ? p2TouchState : p1TouchState, usePlayer2 ? p2RawValue : p1RawValue);
-    }
-    else
-    {
-        // 如果不显示原始数据，清除该区域
-        for (int i = 23; i < 33; i++) // 增加清除的行数，因为现在显示更多数据
-        {
-            ClearLine(i);
-        }
+        ClearLine(i);
     }
 }
 
@@ -580,56 +576,65 @@ void DisplayThresholds()
     bool touchMatrix[8][8] = {false};
     ProcessTouchStateBytes(usePlayer2 ? p2TouchState : p1TouchState, touchMatrix);
 
-    // 显示阈值数据
+    // A1~A8: 0-7
+    // B1~B8: 8-15
+    // C1: 16, C2: 17
+    // D1~D8: 18-25
+    // E1~E8: 26-33
     const char *labels[] = {"D", "A", "E", "B", "C"};
 
     for (int i = 0; i < 8; i++)
     {
         SetCursorPosition(0, 5 + i);
         printf("│ ");
-        
+
         // D区域
-        if (touchMatrix[i][0]) {
+        if (touchMatrix[i][0])
+        {
             SetConsoleTextAttribute(hConsole, COLOR_RED);
         }
         printf("%s%d", labels[0], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100  ", threshold_to_display(touchThreshold[4 * i]));
+        printf("  %2d/100  ", threshold_to_display(touchThreshold[18 + i]));
 
         // A区域
-        if (touchMatrix[i][1]) {
+        if (touchMatrix[i][1])
+        {
             SetConsoleTextAttribute(hConsole, COLOR_RED);
         }
         printf("%s%d", labels[1], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100 │ ", threshold_to_display(touchThreshold[4 * i + 1]));
+        printf("  %2d/100 │ ", threshold_to_display(touchThreshold[i]));
 
         // E区域
-        if (touchMatrix[i][2]) {
+        if (touchMatrix[i][2])
+        {
             SetConsoleTextAttribute(hConsole, COLOR_RED);
         }
         printf("%s%d", labels[2], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100  ", threshold_to_display(touchThreshold[4 * i + 2]));
+        printf("  %2d/100  ", threshold_to_display(touchThreshold[26 + i]));
 
         // B区域
-        if (touchMatrix[i][3]) {
+        if (touchMatrix[i][3])
+        {
             SetConsoleTextAttribute(hConsole, COLOR_RED);
         }
         printf("%s%d", labels[3], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100 │", threshold_to_display(touchThreshold[4 * i + 3]));
+        printf("  %2d/100 │", threshold_to_display(touchThreshold[8 + i]));
 
-        // C区域或其他信息
-        if (i < 2)
+        // C区域
+        if (i < 2) // C1 (Index 16), C2 (Index 17)
         {
             printf(" ");
-            if (touchMatrix[i][4]) {
+            if (touchMatrix[i][4])
+            {
                 SetConsoleTextAttribute(hConsole, COLOR_RED);
             }
             printf("%s%d", labels[4], i + 1);
             SetConsoleTextAttribute(hConsole, defaultAttrs);
-            printf("  %2d/100             │", threshold_to_display(touchThreshold[32 + i]));
+            printf("  %2d/100             │", threshold_to_display(touchThreshold[16 + i]));
         }
         else if (i == 6)
         {
@@ -982,6 +987,10 @@ void ReconnectDevices()
         {
             deviceState1p = DEVICE_OK;
             serial_scan_start(hPort1, &response1);
+
+            // 重连成功后读取当前阈值
+            ReadAllThresholds(hPort1, &response1);
+
             dataChanged = true;
         }
         // 如果重连失败，保持WAIT状态
@@ -1042,8 +1051,8 @@ void UpdateTouchData()
             {
             case SERIAL_CMD_AUTO_SCAN:
                 memcpy(p1TouchState, response1.touch, 7);
-                memcpy(p1RawValue, response1.raw_value, 34);
-                player1Buttons = response1.key_status;
+                // memcpy(p1RawValue, response1.raw_value, 34);
+                player1Buttons = *response1.key_status;
                 opButtons = response1.io_status;
                 package_init(&response1);
                 dataUpdated = true;
@@ -1051,10 +1060,10 @@ void UpdateTouchData()
             case 0xff:
                 memset(p1TouchState, 0, sizeof(p1TouchState));
                 player1Buttons = 0;
-                
+
                 // 关闭当前端口连接
                 close_port(&hPort1);
-                
+
                 // 更新设备状态为等待状态
                 deviceState1p = DEVICE_WAIT;
                 dataChanged = true;
@@ -1072,18 +1081,18 @@ void UpdateTouchData()
         {
         case SERIAL_CMD_AUTO_SCAN:
             memcpy(p2TouchState, response2.touch, 7);
-            memcpy(p2RawValue, response2.raw_value, 34);
-            player2Buttons = response2.key_status;
+            // memcpy(p2RawValue, response2.raw_value, 34);
+            player2Buttons = *response2.key_status;
             opButtons |= response2.io_status;
             package_init(&response2);
             break;
         case 0xff:
             memset(p2TouchState, 0, sizeof(p2TouchState));
             player2Buttons = 0;
-            
+
             // 关闭当前端口连接
             close_port(&hPort2);
-            
+
             // 更新设备状态
             deviceState2p = DEVICE_WAIT;
             dataChanged = true;
@@ -1213,8 +1222,11 @@ void HandleKeyInput()
             }
             break;
         case 64: // F6
-            showRawData = !showRawData;
-            dataChanged = true; // 显示设置变化，需要刷新
+            if (currentWindow == WINDOW_MAIN)
+            {
+                RemapTouchSheet();
+                dataChanged = true; // 映射可能变化，需要刷新
+            }
             break;
         }
         break;
@@ -1286,12 +1298,12 @@ void ModifyThreshold()
     // 获取用户输入
     char input[20];
     fgets(input, sizeof(input), stdin);
-    
+
     // 移除可能的换行符
     size_t len = strlen(input);
-    if (len > 0 && input[len-1] == '\n')
-        input[len-1] = '\0';
-    
+    if (len > 0 && input[len - 1] == '\n')
+        input[len - 1] = '\0';
+
     // 解析输入
     char regionType;
     int regionNum, display_threshold;
@@ -1300,27 +1312,46 @@ void ModifyThreshold()
         // 计算索引
         int index = -1;
 
-        if (regionType >= 'A' && regionType <= 'E' && regionNum >= 1 && regionNum <= 8)
+        // 检查输入的区域类型和编号是否有效
+        bool validRegion = false;
+        if (regionType >= 'A' && regionType <= 'E')
         {
+            if ((regionType == 'A' || regionType == 'B' || regionType == 'D' || regionType == 'E') && regionNum >= 1 && regionNum <= 8)
+            {
+                validRegion = true;
+            }
+            else if (regionType == 'C' && (regionNum == 1 || regionNum == 2))
+            {
+                validRegion = true;
+            }
+        }
+
+        if (validRegion)
+        {
+            // 根据 techdoc.md 的顺序计算索引: A1~A8, B1~B8, C1, C2, D1~D8, E1~E8
             switch (regionType)
             {
-            case 'D':
-                index = (regionNum - 1) * 4;
-                break;
             case 'A':
-                index = (regionNum - 1) * 4 + 1;
-                break;
-            case 'E':
-                index = (regionNum - 1) * 4 + 2;
+                index = regionNum - 1; // Indices 0-7
                 break;
             case 'B':
-                index = (regionNum - 1) * 4 + 3;
+                index = 8 + (regionNum - 1); // Indices 8-15
                 break;
             case 'C':
-                if (regionNum <= 2)
+                if (regionNum == 1)
                 {
-                    index = 32 + (regionNum - 1);
+                    index = 16; // Index 16
                 }
+                else
+                {               // regionNum == 2
+                    index = 17; // Index 17
+                }
+                break;
+            case 'D':
+                index = 18 + (regionNum - 1); // Indices 18-25
+                break;
+            case 'E':
+                index = 26 + (regionNum - 1); // Indices 26-33
                 break;
             }
 
@@ -1329,24 +1360,38 @@ void ModifyThreshold()
             {
                 touchThreshold[index] = display_to_threshold(display_threshold);
 
-                // 发送更新的阈值到设备
+                bool success1p = false, success2p = false;
+
                 if (deviceState1p == DEVICE_OK)
                 {
-                    SendThresholds(hPort1, &response1);
+                    success1p = SendThreshold(hPort1, &response1, index);
                 }
                 if (deviceState2p == DEVICE_OK)
                 {
-                    SendThresholds(hPort2, &response2);
+                    success2p = SendThreshold(hPort2, &response2, index);
                 }
 
                 // 显示成功消息
                 ClearLine(promptY + 3);
                 SetCursorPosition(0, promptY + 3);
-                SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-                printf("Threshold Updated: %c%d = %d/100 (Raw: %d)", regionType, regionNum,
-                       display_threshold, touchThreshold[index]);
-                SetConsoleTextAttribute(hConsole, defaultAttrs);
-                Sleep(1000); // 短暂显示成功消息
+
+                if (success1p || success2p)
+                {
+                    SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+                    printf("Threshold Updated: %c%d = %d/100 (Raw: %d) 1P:%s 2P:%s",
+                           regionType, regionNum, display_threshold, touchThreshold[index],
+                           success1p ? "OK" : "FAIL",
+                           (deviceState2p == DEVICE_OK) ? (success2p ? "OK" : "FAIL") : "N/A");
+                    SetConsoleTextAttribute(hConsole, defaultAttrs);
+                    Sleep(1000); // 短暂显示成功消息
+                }
+                else
+                {
+                    SetConsoleTextAttribute(hConsole, COLOR_RED);
+                    printf("Failed to update threshold! Device did not confirm the change.");
+                    SetConsoleTextAttribute(hConsole, defaultAttrs);
+                    Sleep(2000); // 短暂显示错误消息
+                }
             }
             else
             {
@@ -1395,32 +1440,411 @@ void ModifyThreshold()
     dataChanged = true;
 }
 
-void SendThresholds(HANDLE hPort, serial_packet_t *response)
+uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
 {
+    if (index < 0 || index >= TOUCH_REGIONS || hPort == INVALID_HANDLE_VALUE)
+    {
+        return THRESHOLD_DEFAULT;
+    }
+
+    // 发送读取阈值命令
     package_init(response);
     response->syn = 0xff;
-    response->cmd = SERIAL_CMD_CHANGE_TOUCH_THRESHOLD;
-    response->size = 34;
-    memcpy(response->threshold, touchThreshold, 34);
+    response->cmd = SERIAL_CMD_READ_MONO_THRESHOLD;
+    response->size = 1;
+    response->channel = (uint8_t)index;
     serial_writeresp(hPort, response);
+
+    // 等待响应
+    DWORD startTime = GetTickCount();
+    uint8_t cmd;
+    while ((GetTickCount() - startTime) < 500)
+    { // 500ms超时
+        package_init(response);
+        cmd = serial_read_cmd(hPort, response);
+        if (cmd == SERIAL_CMD_READ_MONO_THRESHOLD)
+        {
+            // 收到正确响应，处理大小端序
+            if (response->size >= 3 && response->channel == index)
+            {
+                // 根据协议，阈值为低字节在前，高字节在后
+                uint16_t value = (response->threshold[1] << 8) | response->threshold[0];
+                return value;
+            }
+        }
+        Sleep(1); // 避免CPU占用过高
+    }
+
+    // 超时或未收到正确响应，返回默认值
+    return THRESHOLD_DEFAULT;
 }
 
+bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index)
+{
+    if (index < 0 || index >= TOUCH_REGIONS || hPort == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    uint16_t value = touchThreshold[index];
+
+    // 发送写入阈值命令
+    package_init(response);
+    response->syn = 0xff;
+    response->cmd = SERIAL_CMD_WRITE_MONO_THRESHOLD;
+    response->size = 3;
+    response->channel = (uint8_t)index;
+    // 低字节在前，高字节在后
+    response->threshold[0] = value & 0xFF;
+    response->threshold[1] = (value >> 8) & 0xFF;
+    serial_writeresp(hPort, response);
+
+    // 等待响应
+    DWORD startTime = GetTickCount();
+    uint8_t cmd;
+    while ((GetTickCount() - startTime) < 1000)
+    { // 1000ms超时
+        package_init(response);
+        cmd = serial_read_cmd(hPort, response);
+        if (cmd == SERIAL_CMD_WRITE_MONO_THRESHOLD)
+        {
+            // 验证响应是否为OK
+            if (response->size >= 1 && response->data[3] == 0x01)
+            {
+                return true;
+            }
+            return false;
+        }
+        Sleep(1); // 避免CPU占用过高
+    }
+
+    // 超时或未收到正确响应
+    return false;
+}
+
+void ReadAllThresholds(HANDLE hPort, serial_packet_t *response)
+{
+    if (hPort == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    // 读取所有34个区块的阈值
+    for (int i = 0; i < TOUCH_REGIONS; i++)
+    {
+        touchThreshold[i] = ReadThreshold(hPort, response, i);
+        Sleep(20); 
+    }
+}
+
+bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
+{
+    if (hPort == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    package_init(response);
+    response->syn = 0xff;
+    response->cmd = SERIAL_CMD_READ_TOUCH_SHEET;
+    response->size = 0x01; 
+    response->data[3] = 0x00;
+    serial_writeresp(hPort, response);
+
+    // 等待响应
+    DWORD startTime = GetTickCount();
+    uint8_t cmd;
+    while ((GetTickCount() - startTime) < 500)
+    { 
+        package_init(response);
+        cmd = serial_read_cmd(hPort, response);
+        if (cmd == SERIAL_CMD_READ_TOUCH_SHEET)
+        {
+            if (response->size == 0x22)
+            {
+                memcpy(touchSheet, response->touch_sheet, TOUCH_REGIONS);
+                return true;
+            }
+            return false;
+        }
+        Sleep(1); 
+    }
+
+    // 超时或未收到正确响应
+    return false;
+}
+
+bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
+{
+    if (hPort == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    // 发送写入触摸映射表命令
+    package_init(response);
+    response->syn = 0xff;
+    response->cmd = SERIAL_CMD_WRITE_TOUCH_SHEET;
+    response->size = 0x22;
+    memcpy(response->touch_sheet, touchSheet, TOUCH_REGIONS);
+    serial_writeresp(hPort, response);
+
+    // 等待响应
+    DWORD startTime = GetTickCount();
+    uint8_t cmd;
+    while ((GetTickCount() - startTime) < 1000)
+    { // 1000ms超时
+        package_init(response);
+        cmd = serial_read_cmd(hPort, response);
+        if (cmd == SERIAL_CMD_WRITE_TOUCH_SHEET)
+        {
+            // 验证响应是否为OK
+            if (response->size >= 1 && response->data[3] == 0x01)
+            {
+                return true;
+            }
+            return false;
+        }
+        Sleep(1); // 避免CPU占用过高
+    }
+
+    // 超时或未收到正确响应
+    return false;
+}
+
+void RemapTouchSheet()
+{
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    WORD defaultAttrs = csbi.wAttributes;
+
+    // 首先读取当前映射
+    bool mappingRead = false;
+
+    if (deviceState1p == DEVICE_OK)
+    {
+        mappingRead = ReadTouchSheet(hPort1, &response1);
+    }
+    else if (deviceState2p == DEVICE_OK)
+    {
+        mappingRead = ReadTouchSheet(hPort2, &response2);
+    }
+
+    if (!mappingRead)
+    {
+        // 显示错误消息
+        SetCursorPosition(0, 23);
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("Failed to read current touch mapping! Cannot proceed with remapping.");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        Sleep(5000);
+        ClearLine(23);
+        return;
+    }
+
+    // 保存当前位置，以便恢复
+    int currentY = csbi.dwCursorPosition.Y;
+
+    // 在底部显示提示信息
+    int promptY = 23;
+
+    // 清除提示区域
+    for (int i = promptY; i < promptY + 6; i++)
+    {
+        ClearLine(i);
+    }
+
+    // 显示当前映射
+    SetCursorPosition(0, promptY);
+    printf("┌──────────────────────────────────── Curva Touch Sheet Mapping ──────────────────────────────────────┐");
+    SetCursorPosition(0, promptY + 1);
+    printf("│0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33│");
+    SetCursorPosition(0, promptY + 2);
+    printf("│o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o │");
+    SetCursorPosition(0, promptY + 3);
+    printf("│");
+    for (int i = 0; i < TOUCH_REGIONS; i++)
+    {
+        printf("%-3d", touchSheet[i]);
+    }
+    printf("│");
+    SetCursorPosition(0, promptY + 4);
+    printf("└─────────────────────────────────────────────────────────────────────────────────────────────────────┘");
+    SetCursorPosition(0, promptY + 5);
+    printf("Please Enter The New Mapping (e.g., A1/5) or press Enter to cancel: ");
+
+    // 显示光标
+    CONSOLE_CURSOR_INFO cursorInfo;
+    GetConsoleCursorInfo(hConsole, &cursorInfo);
+    cursorInfo.bVisible = TRUE;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+
+    // 获取用户输入
+    char input[20];
+    fgets(input, sizeof(input), stdin);
+
+    // 移除可能的换行符
+    size_t len = strlen(input);
+    if (len > 0 && input[len - 1] == '\n')
+        input[len - 1] = '\0';
+
+    // 如果输入为空，取消操作
+    if (strlen(input) == 0)
+    {
+        cursorInfo.bVisible = FALSE;
+        SetConsoleCursorInfo(hConsole, &cursorInfo);
+
+        for (int i = promptY; i < promptY + 6; i++)
+        {
+            ClearLine(i);
+        }
+        return;
+    }
+
+    // 解析输入
+    char regionType;
+    int regionNum, channelValue;
+    if (sscanf(input, "%c%d/%d", &regionType, &regionNum, &channelValue) == 3)
+    {
+        // 计算索引
+        int index = -1;
+
+        // 检查输入的区域类型和编号是否有效
+        bool validRegion = false;
+        if (regionType >= 'A' && regionType <= 'E')
+        {
+            if ((regionType == 'A' || regionType == 'B' || regionType == 'D' || regionType == 'E') && regionNum >= 1 && regionNum <= 8)
+            {
+                validRegion = true;
+            }
+            else if (regionType == 'C' && (regionNum == 1 || regionNum == 2))
+            {
+                validRegion = true;
+            }
+        }
+
+        if (validRegion && channelValue >= 0 && channelValue <= 33)
+        {
+            // 根据触摸分区映射表的排列顺序计算索引
+            switch (regionType)
+            {
+            case 'A':
+                index = regionNum - 1; // Indices 0-7
+                break;
+            case 'B':
+                index = 8 + (regionNum - 1); // Indices 8-15
+                break;
+            case 'C':
+                if (regionNum == 1)
+                {
+                    index = 16; // Index 16
+                }
+                else
+                {               // regionNum == 2
+                    index = 17; // Index 17
+                }
+                break;
+            case 'D':
+                index = 18 + (regionNum - 1); // Indices 18-25
+                break;
+            case 'E':
+                index = 26 + (regionNum - 1); // Indices 26-33
+                break;
+            }
+
+            // 更新映射表并发送到设备
+            if (index >= 0 && index < TOUCH_REGIONS)
+            {
+                touchSheet[index] = (uint8_t)channelValue;
+
+                bool success1p = false, success2p = false;
+
+                if (deviceState1p == DEVICE_OK)
+                {
+                    success1p = WriteTouchSheet(hPort1, &response1);
+                }
+                if (deviceState2p == DEVICE_OK)
+                {
+                    success2p = WriteTouchSheet(hPort2, &response2);
+                }
+
+                // 显示成功或失败消息
+                ClearLine(promptY + 5);
+                SetCursorPosition(0, promptY + 5);
+
+                if (success1p || success2p)
+                {
+                    SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+                    printf("Mapping Updated: %c%d = Channel %d 1P:%s 2P:%s",
+                           regionType, regionNum, channelValue,
+                           success1p ? "OK" : "FAIL",
+                           (deviceState2p == DEVICE_OK) ? (success2p ? "OK" : "FAIL") : "N/A");
+                    SetConsoleTextAttribute(hConsole, defaultAttrs);
+                    Sleep(1500); // 短暂显示成功消息
+                }
+                else
+                {
+                    SetConsoleTextAttribute(hConsole, COLOR_RED);
+                    printf("Failed to update mapping! Device did not confirm the change.");
+                    SetConsoleTextAttribute(hConsole, defaultAttrs);
+                    Sleep(2000); // 短暂显示错误消息
+                }
+            }
+        }
+        else
+        {
+            // 显示错误消息
+            ClearLine(promptY + 5);
+            SetCursorPosition(0, promptY + 5);
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+            printf("Invalid Region ID or Channel Value! Channel must be between 0-33.");
+            SetConsoleTextAttribute(hConsole, defaultAttrs);
+            Sleep(2000); // 短暂显示错误消息
+        }
+    }
+    else
+    {
+        // 显示错误消息
+        ClearLine(promptY + 5);
+        SetCursorPosition(0, promptY + 5);
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("Invalid Input Format! Expected format: [region]/[channel] (e.g., A1/5)");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        Sleep(2000); // 短暂显示错误消息
+    }
+
+    // 隐藏光标
+    cursorInfo.bVisible = FALSE;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+
+    // 清除提示区域
+    for (int i = promptY; i < promptY + 6; i++)
+    {
+        ClearLine(i);
+    }
+
+    // 强制更新显示
+    dataChanged = true;
+}
+
+/*
 void DisplayRawData(uint8_t *touchState, uint8_t *rawValue)
 {
-    int rows = 9;        // 设置显示行数，34字节需要5行显示
+    int rows = 5;        // 5行
     int bytesPerRow = 7; // 每行显示7个字节
 
     // 显示触摸状态字节
     SetCursorPosition(0, 23);
     printf("Raw Touch Data (all 34 bytes):                                              ");
 
-    for (int row = 0; row < rows && row * bytesPerRow < 34; row++)
+    for (int row = 0; row < rows; row++)
     {
-        SetCursorPosition(0, 24 + row);
-        ClearLine(24 + row); // 先清除行，再显示内容
-        
         int startByte = row * bytesPerRow;
         int endByte = min(startByte + bytesPerRow, 34); // 确保不超过34字节
+
+        // 清除当前行并设置光标位置
+        SetCursorPosition(0, 24 + row);
+        ClearLine(24 + row);
 
         // 显示字节索引范围
         printf("Bytes %2d-%2d: ", startByte, endByte - 1);
@@ -1428,10 +1852,7 @@ void DisplayRawData(uint8_t *touchState, uint8_t *rawValue)
         // 显示每个字节的十六进制表示
         for (int i = startByte; i < endByte; i++)
         {
-            if (i < 34)
-            {
-                printf("%02X ", rawValue[i]);
-            }
+            printf("%02X ", rawValue[i]);
         }
 
         // 填充空格使显示整齐
@@ -1445,12 +1866,15 @@ void DisplayRawData(uint8_t *touchState, uint8_t *rawValue)
         // 显示每个字节的十进制表示
         for (int i = startByte; i < endByte; i++)
         {
-            if (i < 34)
-            {
-                printf("%3d ", rawValue[i]);
-            }
+            printf("%3d ", rawValue[i]);
         }
+    }
 
-        ClearLine(24 + row); // 清除行尾可能的残留字符
+    // 清除可能多余的行
+    for (int row = rows; row < 9; row++)
+    {
+        SetCursorPosition(0, 24 + row);
+        ClearLine(24 + row);
     }
 }
+*/
