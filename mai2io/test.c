@@ -1,3 +1,8 @@
+// Todo: 1. 确认触摸区域映射功能是否工作正常
+// 2. Raw读取
+// 3. Kobato状态读取
+// 4. 2P测试逻辑修正
+
 #include <windows.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -243,7 +248,7 @@ int main()
     }
     else
     {
-        deviceState2p = DEVICE_WAIT; // 改为WAIT而不是FAIL
+        deviceState2p = DEVICE_WAIT; 
     }
 
     // 第一次显示完整界面
@@ -274,7 +279,6 @@ int main()
         // 只有数据变化时才刷新屏幕
         if (dataChanged || IsDataChanged())
         {
-            // 只更新变化的部分，而不是整个屏幕
             DisplayHeader(deviceState1p, deviceState2p);
 
             if (currentWindow == WINDOW_MAIN)
@@ -312,7 +316,6 @@ int main()
     return 0;
 }
 
-// 清除指定行
 void ClearLine(int line)
 {
     COORD coord = {0, (SHORT)line};
@@ -430,7 +433,6 @@ void DisplayMainWindow()
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
 
-    // test_layout.txt布局
     SetCursorPosition(0, 4);
     printf("┌──────────────────────────── Trigger Threshold ───────────────────────────┐   ┌───── Input Test ─────┐");
 
@@ -1191,7 +1193,7 @@ void HandleKeyInput()
     {
     case 9: // Tab键
         SwitchWindow();
-        dataChanged = true; // 窗口切换，需要刷新
+        dataChanged = true; 
         break;
     case 27: // Esc键
         running = false;
@@ -1201,7 +1203,7 @@ void HandleKeyInput()
         if (deviceState2p == DEVICE_OK)
         {
             SwitchPlayer();
-            dataChanged = true; // 玩家切换，需要刷新
+            dataChanged = true; 
         }
         break;
     case 0:
@@ -1211,24 +1213,24 @@ void HandleKeyInput()
         {
         case 59: // F1
             ledButtonsTest = !ledButtonsTest;
-            dataChanged = true; // LED状态变化，需要刷新
+            dataChanged = true; 
             break;
         case 60: // F2
             ledControllerTest = !ledControllerTest;
-            dataChanged = true; // LED状态变化，需要刷新
+            dataChanged = true; 
             break;
         case 63: // F5
             if (currentWindow == WINDOW_MAIN)
             {
                 ModifyThreshold();
-                dataChanged = true; // 阈值可能变化，需要刷新
+                dataChanged = true; 
             }
             break;
         case 64: // F6
             if (currentWindow == WINDOW_MAIN)
             {
                 RemapTouchSheet();
-                dataChanged = true; // 映射可能变化，需要刷新
+                dataChanged = true; 
             }
             break;
         }
@@ -1241,12 +1243,12 @@ void SwitchWindow()
     if (currentWindow == WINDOW_MAIN)
     {
         currentWindow = WINDOW_TOUCHPANEL;
-        system("cls"); // 窗口切换时需要清屏
+        system("cls"); 
     }
     else
     {
         currentWindow = WINDOW_MAIN;
-        system("cls"); // 窗口切换时需要清屏
+        system("cls"); 
     }
 }
 
@@ -1331,7 +1333,6 @@ void ModifyThreshold()
 
         if (validRegion)
         {
-            // 根据 techdoc.md 的顺序计算索引: A1~A8, B1~B8, C1, C2, D1~D8, E1~E8
             switch (regionType)
             {
             case 'A':
