@@ -25,11 +25,11 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 
 // 常量定义
 #define TOUCH_REGIONS 34        // 触摸区域总数
-#define BUTTONS_COUNT 9         // 按钮总数（+1）
+#define BUTTONS_COUNT 8         // 按钮总数
 #define THRESHOLD_DEFAULT 32768 // 默认阈值（65535的一半，对应显示值50）
 
 // 版本号定义
-const char* VERSION = "v.EVALUATION";  // 添加版本号常量
+const char *VERSION = "v.EVALUATION.1"; // 添加版本号常量
 
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -248,7 +248,7 @@ int main()
     }
     else
     {
-        deviceState2p = DEVICE_WAIT; 
+        deviceState2p = DEVICE_WAIT;
     }
 
     // 第一次显示完整界面
@@ -1117,7 +1117,19 @@ void UpdateButtonLEDs()
     static DWORD fetLastTime = 0;
     DWORD currentTime = GetTickCount();
 
-    // 按钮LED测试逻辑
+    // 检查当前激活的设备状态，如果是WAIT状态则禁用所有测试
+    if ((usePlayer2 && deviceState2p != DEVICE_OK) || (!usePlayer2 && deviceState1p != DEVICE_OK))
+    {
+        // 如果当前设备不可用，自动关闭所有测试
+        if (ledButtonsTest || ledControllerTest)
+        {
+            ledButtonsTest = false;
+            ledControllerTest = false;
+            dataChanged = true;
+        }
+        return;
+    }
+
     if (ledButtonsTest)
     {
         if (currentTime - buttonLastTime > 100)
@@ -1193,7 +1205,7 @@ void HandleKeyInput()
     {
     case 9: // Tab键
         SwitchWindow();
-        dataChanged = true; 
+        dataChanged = true;
         break;
     case 27: // Esc键
         running = false;
@@ -1203,7 +1215,7 @@ void HandleKeyInput()
         if (deviceState2p == DEVICE_OK)
         {
             SwitchPlayer();
-            dataChanged = true; 
+            dataChanged = true;
         }
         break;
     case 0:
@@ -1212,25 +1224,37 @@ void HandleKeyInput()
         switch (key)
         {
         case 59: // F1
-            ledButtonsTest = !ledButtonsTest;
-            dataChanged = true; 
+            if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
+            {
+                ledButtonsTest = !ledButtonsTest;
+                dataChanged = true;
+            }
             break;
         case 60: // F2
-            ledControllerTest = !ledControllerTest;
-            dataChanged = true; 
+            if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
+            {
+                ledControllerTest = !ledControllerTest;
+                dataChanged = true;
+            }
             break;
         case 63: // F5
             if (currentWindow == WINDOW_MAIN)
             {
-                ModifyThreshold();
-                dataChanged = true; 
+                if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
+                {
+                    ModifyThreshold();
+                    dataChanged = true;
+                }
             }
             break;
         case 64: // F6
             if (currentWindow == WINDOW_MAIN)
             {
-                RemapTouchSheet();
-                dataChanged = true; 
+                if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
+                {
+                    RemapTouchSheet();
+                    dataChanged = true;
+                }
             }
             break;
         }
@@ -1243,12 +1267,12 @@ void SwitchWindow()
     if (currentWindow == WINDOW_MAIN)
     {
         currentWindow = WINDOW_TOUCHPANEL;
-        system("cls"); 
+        system("cls");
     }
     else
     {
         currentWindow = WINDOW_MAIN;
-        system("cls"); 
+        system("cls");
     }
 }
 
@@ -1760,10 +1784,13 @@ void RemapTouchSheet()
     printf("│");
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
-        if (touchSheet[i] < TOUCH_REGIONS) {
+        if (touchSheet[i] < TOUCH_REGIONS)
+        {
             printf("%-3s", blockLabels[touchSheet[i]]);
-        } else {
-            printf("??"); 
+        }
+        else
+        {
+            printf("??");
         }
     }
     printf("│");
