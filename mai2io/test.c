@@ -1,7 +1,6 @@
 // Todo: 1. 确认触摸区域映射功能是否工作正常
 // 2. Raw读取
-// 3. Kobato状态读取
-// 4. 2P测试逻辑修正
+// 3. 2P测试逻辑修正
 
 #include <windows.h>
 #include <stdio.h>
@@ -70,6 +69,19 @@ char *Vid = "VID_AFF1";
 char *Pid_1p = "PID_52A5";
 char *Pid_2p = "PID_52A6";
 
+// Kobato设备VID/PID
+char *Vid_Kobato = "VID_0483";
+char *Pid_Kobato = "PID_5740";
+
+DeviceState deviceStateKobato = DEVICE_WAIT;
+HANDLE hPortKobato = INVALID_HANDLE_VALUE;
+char comPortKobato[13] = {0};
+bool kobatoHighBaud = FALSE;
+bool kobatoLedEnabled = FALSE;
+uint8_t kobatoLedBrightness = 0;
+bool kobatoExtendEnabled = FALSE;
+bool kobatoReflectEnabled = FALSE;
+
 // 玩家输入状态
 uint8_t player1Buttons = 0;
 uint8_t player2Buttons = 0;
@@ -125,6 +137,11 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response);
 bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response);
 bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response);
 void RemapTouchSheet();
+
+// 添加Kobato相关函数声明
+void ConnectKobato();
+bool ReadKobatoStatus();
+void ReconnectKobato();
 
 bool IsDataChanged();
 void ClearLine(int line);
@@ -251,6 +268,8 @@ int main()
         deviceState2p = DEVICE_WAIT;
     }
 
+    ConnectKobato(); // 初始连接Kobato设备
+
     // 第一次显示完整界面
     DisplayHeader(deviceState1p, deviceState2p);
     if (currentWindow == WINDOW_MAIN)
@@ -307,6 +326,10 @@ int main()
     {
         serial_scan_stop(hPort2, &response2);
         close_port(&hPort2);
+    }
+    if (hPortKobato != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(hPortKobato);
     }
 
     // 显示光标
@@ -541,12 +564,74 @@ void DisplayMainWindow()
     printf("   │");
 
     SetCursorPosition(0, 20);
-    printf("│ State: %-3s | Baud: %-3s | LED: %-7s | Extend: %-3s | Reflect: %-3s │        │ Test           ",
-           "Wait",
-           "N/A",
-           "N/A",
-           "N/A",
-           "N/A");
+    printf("│ State: ");
+
+    switch (deviceStateKobato)
+    {
+    case DEVICE_WAIT:
+        printf("Wait");
+        break;
+    case DEVICE_FAIL:
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("Fail");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        break;
+    case DEVICE_OK:
+        SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+        printf("OK  ");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        break;
+    }
+
+    printf(" | Baud: ");
+    if (deviceStateKobato == DEVICE_OK)
+    {
+        printf("%-3s", kobatoHighBaud ? "HIGH" : "LOW ");
+    }
+    else
+    {
+        printf("N/A ");
+    }
+
+    printf(" | LED: ");
+    if (deviceStateKobato == DEVICE_OK)
+    {
+        if (kobatoLedEnabled)
+        {
+            printf("ON/%-3d", kobatoLedBrightness);
+        }
+        else
+        {
+            printf("OFF   ");
+        }
+    }
+    else
+    {
+        printf("N/A   ");
+    }
+
+    printf(" | Extend: ");
+    if (deviceStateKobato == DEVICE_OK)
+    {
+        printf("%-3s", kobatoExtendEnabled ? "ON " : "OFF");
+    }
+    else
+    {
+        printf("N/A");
+    }
+
+    printf(" | Reflect: ");
+    if (deviceStateKobato == DEVICE_OK)
+    {
+        printf("%-3s", kobatoReflectEnabled ? "ON " : "OFF");
+    }
+    else
+    {
+        printf("N/A");
+    }
+
+    printf(" │        │ Test           ");
+
     // 显示Test按钮状态
     if (opButtons & (1 << 0))
     {
@@ -938,6 +1023,32 @@ void UpdateDeviceState()
     if (prevState1p != deviceState1p || prevState2p != deviceState2p)
     {
         dataChanged = true;
+    }
+
+    if (deviceStateKobato == DEVICE_WAIT)
+    {
+        ReconnectKobato();
+    }
+    else if (deviceStateKobato == DEVICE_OK)
+    {
+        // 定期刷新Kobato状态
+        static DWORD lastKobatoUpdateTime = 0;
+        DWORD currentTime = GetTickCount();
+
+        if (currentTime - lastKobatoUpdateTime >= 3000)
+        { // 每3秒更新一次
+            lastKobatoUpdateTime = currentTime;
+            if (!ReadKobatoStatus())
+            {
+                deviceStateKobato = DEVICE_FAIL;
+                dataChanged = true;
+            }
+        }
+    }
+    else if (deviceStateKobato == DEVICE_FAIL)
+    {
+        // 如果连接失败，尝试重连
+        ReconnectKobato();
     }
 }
 
@@ -1953,6 +2064,240 @@ void RemapTouchSheet()
 
     // 强制更新显示
     dataChanged = true;
+}
+
+// 连接Kobato设备并初始化
+void ConnectKobato()
+{
+    // 尝试通过VID/PID获取Kobato设备的COM端口
+    memcpy(comPortKobato, GetSerialPortByVidPid(Vid_Kobato, Pid_Kobato), 6);
+    if (comPortKobato[0] == 0)
+    {
+        // 如果找不到设备，状态保持为WAIT
+        deviceStateKobato = DEVICE_WAIT;
+        return;
+    }
+
+    // 处理端口号格式
+    if (comPortKobato[4] == 0)
+    {
+        // 端口号小于10
+        int port_num = (comPortKobato[3] - '0');
+        snprintf(comPortKobato, 10, "\\\\.\\COM%d", port_num);
+    }
+    else if (comPortKobato[5] == 0)
+    {
+        // 两位数端口号
+        int port_num = (comPortKobato[3] - '0') * 10 + (comPortKobato[4] - '0');
+        snprintf(comPortKobato, 10, "\\\\.\\COM%d", port_num);
+    }
+    else
+    {
+        // 三位数端口号
+        int port_num = (comPortKobato[3] - '0') * 100 + (comPortKobato[4] - '0') * 10 + (comPortKobato[5] - '0');
+        snprintf(comPortKobato, 11, "\\\\.\\COM%d", port_num);
+    }
+
+    // 打开串口
+    hPortKobato = CreateFile(comPortKobato, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hPortKobato == INVALID_HANDLE_VALUE)
+    {
+        deviceStateKobato = DEVICE_WAIT; // 无法打开串口，可能设备未连接
+        return;
+    }
+
+    // 找到了设备并打开了串口，从这一点开始如果通信失败则标记为FAIL而非WAIT
+    
+    // 先尝试高波特率
+    DCB dcb = {0};
+    dcb.DCBlength = sizeof(DCB);
+    if (!GetCommState(hPortKobato, &dcb))
+    {
+        CloseHandle(hPortKobato);
+        hPortKobato = INVALID_HANDLE_VALUE;
+        deviceStateKobato = DEVICE_FAIL; // 修改：通信失败标记为FAIL
+        return;
+    }
+
+    // 设置超时
+    COMMTIMEOUTS timeouts = {0};
+    timeouts.ReadIntervalTimeout = 50;
+    timeouts.ReadTotalTimeoutConstant = 1000;
+    timeouts.ReadTotalTimeoutMultiplier = 10;
+    timeouts.WriteTotalTimeoutConstant = 100;
+    timeouts.WriteTotalTimeoutMultiplier = 10;
+    if (!SetCommTimeouts(hPortKobato, &timeouts)) // 添加错误检查
+    {
+        CloseHandle(hPortKobato);
+        hPortKobato = INVALID_HANDLE_VALUE;
+        deviceStateKobato = DEVICE_FAIL;
+        return;
+    }
+
+    // 添加复位序列 - 重要的修改
+    uint8_t mode_rst_cmd[30];
+    memset(mode_rst_cmd, 0xaf, sizeof(mode_rst_cmd));
+    
+    // 先用低波特率发送复位命令
+    dcb.BaudRate = 38400;
+    dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY;
+    dcb.StopBits = ONESTOPBIT;
+    if (!SetCommState(hPortKobato, &dcb)) // 添加错误检查
+    {
+        CloseHandle(hPortKobato);
+        hPortKobato = INVALID_HANDLE_VALUE;
+        deviceStateKobato = DEVICE_FAIL;
+        return;
+    }
+    
+    DWORD bytesWritten;
+    if (!WriteFile(hPortKobato, mode_rst_cmd, sizeof(mode_rst_cmd), &bytesWritten, NULL) || 
+        bytesWritten != sizeof(mode_rst_cmd)) // 添加错误检查
+    {
+        CloseHandle(hPortKobato);
+        hPortKobato = INVALID_HANDLE_VALUE;
+        deviceStateKobato = DEVICE_FAIL;
+        return;
+    }
+    Sleep(10);
+    
+    // 再用高波特率发送复位命令
+    dcb.BaudRate = 115200;
+    if (!SetCommState(hPortKobato, &dcb)) // 添加错误检查
+    {
+        CloseHandle(hPortKobato);
+        hPortKobato = INVALID_HANDLE_VALUE;
+        deviceStateKobato = DEVICE_FAIL;
+        return;
+    }
+    
+    if (!WriteFile(hPortKobato, mode_rst_cmd, sizeof(mode_rst_cmd), &bytesWritten, NULL) || 
+        bytesWritten != sizeof(mode_rst_cmd)) // 添加错误检查
+    {
+        CloseHandle(hPortKobato);
+        hPortKobato = INVALID_HANDLE_VALUE;
+        deviceStateKobato = DEVICE_FAIL;
+        return;
+    }
+    Sleep(1000); // 更长的等待时间
+
+    // 尝试以高波特率读取设备信息
+    if (!ReadKobatoStatus())
+    {
+        // 尝试低波特率
+        dcb.BaudRate = 38400;
+        if (!SetCommState(hPortKobato, &dcb))
+        {
+            CloseHandle(hPortKobato);
+            hPortKobato = INVALID_HANDLE_VALUE;
+            deviceStateKobato = DEVICE_FAIL; // 修改：通信失败标记为FAIL
+            return;
+        }
+
+        if (!ReadKobatoStatus())
+        {
+            CloseHandle(hPortKobato);
+            hPortKobato = INVALID_HANDLE_VALUE;
+            deviceStateKobato = DEVICE_FAIL; // 修改：通信失败标记为FAIL
+            return;
+        }
+    }
+
+    deviceStateKobato = DEVICE_OK;
+}
+
+// 读取Kobato设备状态
+bool ReadKobatoStatus()
+{
+    if (hPortKobato == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    // 清空接收缓冲区
+    PurgeComm(hPortKobato, PURGE_RXCLEAR);
+
+    // 发送读取EEPROM命令
+    uint8_t send_buffer[] = {0xE0, 0x06, 0x00, 0x00, 0xF6, 0x00, 0x00, 0xFC};
+    DWORD bytesWritten;
+
+    if (!WriteFile(hPortKobato, send_buffer, sizeof(send_buffer), &bytesWritten, NULL) || bytesWritten != sizeof(send_buffer))
+    {
+        return false;
+    }
+
+    Sleep(1000); // 给设备足够的响应时间
+    
+    // 接收缓冲区扩大以确保能够接收完整数据包
+    uint8_t recv_buffer[256] = {0};
+    DWORD bytesRead = 0;
+    
+    if (!ReadFile(hPortKobato, recv_buffer, sizeof(recv_buffer), &bytesRead, NULL))
+    {
+        return false;
+    }
+    
+    // 调试输出接收到的字节
+    #ifdef DEBUG
+    for (DWORD i = 0; i < bytesRead; i++) {
+        printf("%02X ", recv_buffer[i]);
+    }
+    printf("\n");
+    #endif
+    
+    // 实现更精确的数据包解析
+    for (DWORD i = 0; i < bytesRead - 8; i++) {
+        // 寻找命令包头0xE0
+        if (recv_buffer[i] == 0xE0) {
+            // 检查是否有足够的字节用于解析
+            if (i + 10 < bytesRead) {
+                // 第7个和第8个字节包含EEPROM数据
+                uint8_t setting_byte = recv_buffer[i + 7];  // 主设置字节
+                uint8_t led_bright = recv_buffer[i + 8];   // LED亮度
+
+                // 正确解析设备设置
+                kobatoHighBaud = (setting_byte & 0x02) != 0;     // 位1: 高波特率
+                kobatoLedEnabled = (setting_byte & 0x04) != 0;   // 位2: LED启用
+                kobatoExtendEnabled = (setting_byte & 0x10) != 0; // 位4: 扩展功能
+                kobatoReflectEnabled = (setting_byte & 0x08) != 0; // 位3: 反射功能
+                kobatoLedBrightness = led_bright;                 // LED亮度值
+                
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// 尝试重新连接Kobato设备
+void ReconnectKobato()
+{
+    static DWORD lastReconnectTime = 0;
+    DWORD currentTime = GetTickCount();
+
+    // 每2秒尝试重连一次
+    if (currentTime - lastReconnectTime < 2000)
+    {
+        return;
+    }
+
+    lastReconnectTime = currentTime;
+
+    // 关闭之前的连接
+    if (hPortKobato != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(hPortKobato);
+        hPortKobato = INVALID_HANDLE_VALUE;
+    }
+
+    // 设置为WAIT状态，表示正在尝试连接
+    deviceStateKobato = DEVICE_WAIT;
+    dataChanged = true;
+    
+    // 尝试连接
+    ConnectKobato();
 }
 
 /*
