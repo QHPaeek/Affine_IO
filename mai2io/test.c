@@ -485,7 +485,7 @@ void DisplayMainWindow()
     printf(" │    │  [F5] Modify Region Threshold  │   │ Select         ");
 
     // 显示Select 按钮状态
-    if ((usePlayer2 ? player2Buttons : player1Buttons) & (1 << 9))
+    if (opButtons & (1 << 4))
     {
         SetConsoleTextAttribute(hConsole, COLOR_GREEN);
         printf("ON ");
@@ -1168,7 +1168,7 @@ void UpdateTouchData()
             case SERIAL_CMD_AUTO_SCAN:
                 memcpy(p1TouchState, response1.touch, 7);
                 // memcpy(p1RawValue, response1.raw_value, 34);
-                player1Buttons = *response1.key_status;
+                player1Buttons = response1.key_status[0] | ((response1.key_status[1] & 0xF0) >> 4 << 4);
                 opButtons = response1.io_status;
                 package_init(&response1);
                 dataUpdated = true;
@@ -1198,7 +1198,7 @@ void UpdateTouchData()
         case SERIAL_CMD_AUTO_SCAN:
             memcpy(p2TouchState, response2.touch, 7);
             // memcpy(p2RawValue, response2.raw_value, 34);
-            player2Buttons = *response2.key_status;
+            player2Buttons = response2.key_status[0] | ((response2.key_status[1] & 0xF0) >> 4 << 4);
             opButtons |= response2.io_status;
             package_init(&response2);
             break;
