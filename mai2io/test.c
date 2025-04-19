@@ -28,7 +28,7 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 #define THRESHOLD_DEFAULT 32768 // 默认阈值（65535的一半，对应显示值50）
 
 // 版本号定义
-const char *VERSION = "v.EVALUATION.1"; // 添加版本号常量
+const char *VERSION = "v.EVALUATION.2"; // 添加版本号常量
 
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -1168,7 +1168,7 @@ void UpdateTouchData()
             case SERIAL_CMD_AUTO_SCAN:
                 memcpy(p1TouchState, response1.touch, 7);
                 // memcpy(p1RawValue, response1.raw_value, 34);
-                player1Buttons = response1.key_status[0] | ((response1.key_status[1] & 0xF0) >> 4 << 4);
+                player1Buttons = (response1.key_status[0] & 0x0F) | (response1.key_status[1] & 0xF0);
                 opButtons = response1.io_status;
                 package_init(&response1);
                 dataUpdated = true;
@@ -1198,7 +1198,7 @@ void UpdateTouchData()
         case SERIAL_CMD_AUTO_SCAN:
             memcpy(p2TouchState, response2.touch, 7);
             // memcpy(p2RawValue, response2.raw_value, 34);
-            player2Buttons = response2.key_status[0] | ((response2.key_status[1] & 0xF0) >> 4 << 4);
+            player2Buttons = (response2.key_status[0] & 0x0F) | (response2.key_status[1] & 0xF0);
             opButtons |= response2.io_status;
             package_init(&response2);
             break;
