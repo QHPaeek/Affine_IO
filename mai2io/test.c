@@ -28,7 +28,7 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 #define THRESHOLD_DEFAULT 32768 // 默认阈值（65535的一半，对应显示值50）
 
 // 版本号定义
-const char *VERSION = "v.EVALUATION.2"; // 添加版本号常量
+const char *VERSION = "v.EVALUATION.3"; // 添加版本号常量
 
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -1724,7 +1724,6 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
             // 如果收到正确的命令码和数据长度
             if (cmd == SERIAL_CMD_READ_TOUCH_SHEET && response->size == 0x22)
             {
-                // 修复偏移问题：确保正确复制所有34字节的实际数据
                 memcpy(touchSheet, response->touch_sheet, TOUCH_REGIONS);
                 return true;
             }
@@ -1759,7 +1758,6 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
                         // 如果已接收到全部数据及校验和
                         if (bytesReceived == TOUCH_REGIONS + 4)
                         {
-                            // 确保仅复制34字节的映射数据，不包括校验和
                             memcpy(touchSheet, &buffer[3], TOUCH_REGIONS);
                             return true;
                         }
@@ -1893,16 +1891,22 @@ void RemapTouchSheet()
     printf("│o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o │");
     SetCursorPosition(0, promptY + 3);
     printf("│");
-    for (int i = 0; i < TOUCH_REGIONS; i++)
+    for (int i = 0; i < TOUCH_REGIONS - 1; i++)
     {
         if (touchSheet[i] < TOUCH_REGIONS)
         {
-            printf("%-3s", blockLabels[touchSheet[i]]);
+            printf("%-2s ", blockLabels[touchSheet[i]]); // 打印标签，留一个空格
         }
         else
         {
-            printf("??");
+            printf("?? "); // 无效映射显示为 "?? "
         }
+    }
+    // 单独处理最后一个标签，不带空格
+    int lastIndex = TOUCH_REGIONS - 1;
+    if (touchSheet[lastIndex] < TOUCH_REGIONS)
+    {
+        printf("%-2s", blockLabels[touchSheet[lastIndex]]); // 打印最后一个标签，不加空格
     }
     printf("│");
     SetCursorPosition(0, promptY + 4);
@@ -1992,7 +1996,7 @@ void RemapTouchSheet()
             // 更新映射表并发送到设备
             if (index >= 0 && index < TOUCH_REGIONS)
             {
-                touchSheet[index] = (uint8_t)channelValue;
+                touchSheet[channelValue] = (uint8_t)index;
 
                 bool success1p = false, success2p = false;
 
