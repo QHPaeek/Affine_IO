@@ -28,7 +28,7 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 #define THRESHOLD_DEFAULT 32768 // 默认阈值（65535的一半，对应显示值50）
 
 // 版本号定义
-const char *VERSION = "v.EVALUATION.3"; // 添加版本号常量
+const char *VERSION = "v.EVALUATION.4"; // 添加版本号常量
 
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -137,6 +137,9 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response);
 bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response);
 bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response);
 void RemapTouchSheet();
+
+void SaveSettings();
+void LoadSettings();
 
 // 添加Kobato相关函数声明
 void ConnectKobato();
@@ -434,7 +437,7 @@ void DisplayHeader(DeviceState state1p, DeviceState state2p)
     SetCursorPosition(0, 2);
     if (currentWindow == WINDOW_MAIN)
     {
-        printf("Press [TAB] to switch to Touch Panel View");
+        printf("Press [TAB] to switch to Touch Panel View    Press [L] / [S] to LOAD / SAVE curva.ini");
         if (deviceState2p == DEVICE_OK)
         {
             printf(" | Press [N] to switch to %s if connected", usePlayer2 ? "1P" : "2P");
@@ -1329,6 +1332,16 @@ void HandleKeyInput()
             dataChanged = true;
         }
         break;
+    case 'l': // 加载配置
+    case 'L':
+        LoadSettings();
+        dataChanged = true;
+        break;
+    case 's': // 保存配置
+    case 'S':
+        SaveSettings();
+        dataChanged = true;
+        break;
     case 0:
     case 224: // 功能键前缀
         key = _getch();
@@ -2111,7 +2124,7 @@ void ConnectKobato()
     }
 
     // 找到了设备并打开了串口，从这一点开始如果通信失败则标记为FAIL而非WAIT
-    
+
     // 先尝试高波特率
     DCB dcb = {0};
     dcb.DCBlength = sizeof(DCB);
@@ -2141,7 +2154,7 @@ void ConnectKobato()
     // 添加复位序列 - 重要的修改
     uint8_t mode_rst_cmd[30];
     memset(mode_rst_cmd, 0xaf, sizeof(mode_rst_cmd));
-    
+
     // 先用低波特率发送复位命令
     dcb.BaudRate = 38400;
     dcb.ByteSize = 8;
@@ -2154,9 +2167,9 @@ void ConnectKobato()
         deviceStateKobato = DEVICE_FAIL;
         return;
     }
-    
+
     DWORD bytesWritten;
-    if (!WriteFile(hPortKobato, mode_rst_cmd, sizeof(mode_rst_cmd), &bytesWritten, NULL) || 
+    if (!WriteFile(hPortKobato, mode_rst_cmd, sizeof(mode_rst_cmd), &bytesWritten, NULL) ||
         bytesWritten != sizeof(mode_rst_cmd)) // 添加错误检查
     {
         CloseHandle(hPortKobato);
@@ -2165,7 +2178,7 @@ void ConnectKobato()
         return;
     }
     Sleep(10);
-    
+
     // 再用高波特率发送复位命令
     dcb.BaudRate = 115200;
     if (!SetCommState(hPortKobato, &dcb)) // 添加错误检查
@@ -2175,8 +2188,8 @@ void ConnectKobato()
         deviceStateKobato = DEVICE_FAIL;
         return;
     }
-    
-    if (!WriteFile(hPortKobato, mode_rst_cmd, sizeof(mode_rst_cmd), &bytesWritten, NULL) || 
+
+    if (!WriteFile(hPortKobato, mode_rst_cmd, sizeof(mode_rst_cmd), &bytesWritten, NULL) ||
         bytesWritten != sizeof(mode_rst_cmd)) // 添加错误检查
     {
         CloseHandle(hPortKobato);
@@ -2232,41 +2245,45 @@ bool ReadKobatoStatus()
     }
 
     Sleep(1000); // 给设备足够的响应时间
-    
+
     // 接收缓冲区扩大以确保能够接收完整数据包
     uint8_t recv_buffer[256] = {0};
     DWORD bytesRead = 0;
-    
+
     if (!ReadFile(hPortKobato, recv_buffer, sizeof(recv_buffer), &bytesRead, NULL))
     {
         return false;
     }
-    
-    // 调试输出接收到的字节
-    #ifdef DEBUG
-    for (DWORD i = 0; i < bytesRead; i++) {
+
+// 调试输出接收到的字节
+#ifdef DEBUG
+    for (DWORD i = 0; i < bytesRead; i++)
+    {
         printf("%02X ", recv_buffer[i]);
     }
     printf("\n");
-    #endif
-    
+#endif
+
     // 实现更精确的数据包解析
-    for (DWORD i = 0; i < bytesRead - 8; i++) {
+    for (DWORD i = 0; i < bytesRead - 8; i++)
+    {
         // 寻找命令包头0xE0
-        if (recv_buffer[i] == 0xE0) {
+        if (recv_buffer[i] == 0xE0)
+        {
             // 检查是否有足够的字节用于解析
-            if (i + 10 < bytesRead) {
+            if (i + 10 < bytesRead)
+            {
                 // 第7个和第8个字节包含EEPROM数据
-                uint8_t setting_byte = recv_buffer[i + 7];  // 主设置字节
+                uint8_t setting_byte = recv_buffer[i + 7]; // 主设置字节
                 uint8_t led_bright = recv_buffer[i + 8];   // LED亮度
 
                 // 正确解析设备设置
-                kobatoHighBaud = (setting_byte & 0x02) != 0;     // 位1: 高波特率
-                kobatoLedEnabled = (setting_byte & 0x04) != 0;   // 位2: LED启用
-                kobatoExtendEnabled = (setting_byte & 0x10) != 0; // 位4: 扩展功能
+                kobatoHighBaud = (setting_byte & 0x02) != 0;       // 位1: 高波特率
+                kobatoLedEnabled = (setting_byte & 0x04) != 0;     // 位2: LED启用
+                kobatoExtendEnabled = (setting_byte & 0x10) != 0;  // 位4: 扩展功能
                 kobatoReflectEnabled = (setting_byte & 0x08) != 0; // 位3: 反射功能
-                kobatoLedBrightness = led_bright;                 // LED亮度值
-                
+                kobatoLedBrightness = led_bright;                  // LED亮度值
+
                 return true;
             }
         }
@@ -2299,9 +2316,265 @@ void ReconnectKobato()
     // 设置为WAIT状态，表示正在尝试连接
     deviceStateKobato = DEVICE_WAIT;
     dataChanged = true;
-    
+
     // 尝试连接
     ConnectKobato();
+}
+
+void SaveSettings()
+{
+    FILE *file = fopen("curva.ini", "wb");
+    if (file == NULL)
+    {
+        // 保存失败，显示错误信息
+        int promptY = 23;
+        for (int i = promptY; i < promptY + 3; i++)
+        {
+            ClearLine(i);
+        }
+        
+        SetCursorPosition(0, promptY);
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("Failed to save settings to curva.ini file!");
+        SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+        Sleep(2000);
+        return;
+    }
+
+    // 创建区块标识符映射表
+    const char *blockLabels[TOUCH_REGIONS] = {
+        "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", // 0-7
+        "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", // 8-15
+        "C1", "C2",                                     // 16-17
+        "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", // 18-25
+        "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"  // 26-33
+    };
+
+    // 写入文件标识和版本
+    fprintf(file, "[Curva Settings]\n");
+    fprintf(file, "Version=%s\n", VERSION);
+    fprintf(file, "Date=%s\n\n", __DATE__);
+
+    // 写入阈值数据 - 转换为0-100范围
+    fprintf(file, "[Thresholds]\n");
+    for (int i = 0; i < TOUCH_REGIONS; i++)
+    {
+        uint8_t displayValue = threshold_to_display(touchThreshold[i]); // 转换为0-100显示值
+        fprintf(file, "%s=%u\n", blockLabels[i], displayValue);
+    }
+
+    // 写入触摸映射数据 - 使用区块标识符而非数字
+    fprintf(file, "\n[TouchSheet]\n");
+    for (int i = 0; i < TOUCH_REGIONS; i++)
+    {
+        // 确保映射值在有效范围内
+        if (touchSheet[i] < TOUCH_REGIONS)
+        {
+            fprintf(file, "Channel%d=%s\n", i, blockLabels[touchSheet[i]]);
+        }
+        else
+        {
+            fprintf(file, "Channel%d=INVALID\n", i);
+        }
+    }
+
+    fclose(file);
+
+    // 显示成功消息
+    int promptY = 23;
+    for (int i = promptY; i < promptY + 3; i++)
+    {
+        ClearLine(i);
+    }
+    
+    SetCursorPosition(0, promptY);
+    SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+    printf("Settings successfully saved to curva.ini file!");
+    SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+    Sleep(2000);
+
+    // 清除消息
+    for (int i = promptY; i < promptY + 3; i++)
+    {
+        ClearLine(i);
+    }
+}
+
+void LoadSettings()
+{
+    FILE *file = fopen("curva.ini", "rb");
+    if (file == NULL)
+    {
+        // 加载失败，显示错误信息
+        int promptY = 23;
+        for (int i = promptY; i < promptY + 3; i++)
+        {
+            ClearLine(i);
+        }
+        
+        SetCursorPosition(0, promptY);
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("Failed to load settings: curva.ini file not found!");
+        SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+        Sleep(2000);
+        return;
+    }
+
+    // 创建区块标识符映射表
+    const char *blockLabels[TOUCH_REGIONS] = {
+        "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", // 0-7
+        "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", // 8-15
+        "C1", "C2",                                     // 16-17
+        "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", // 18-25
+        "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"  // 26-33
+    };
+
+    char line[256];
+    char section[32] = "";
+    bool thresholdsChanged = false;
+    bool touchSheetChanged = false;
+
+    while (fgets(line, sizeof(line), file) != NULL)
+    {
+        line[strcspn(line, "\r\n")] = 0; // 移除换行符
+        
+        // 跳过空行和注释行
+        if (strlen(line) <= 1 || line[0] == ';' || line[0] == '#')
+            continue;
+            
+        // 判断是否为区块标识
+        if (line[0] == '[' && line[strlen(line) - 1] == ']')
+        {
+            strncpy(section, line + 1, strlen(line) - 2);
+            section[strlen(line) - 2] = '\0';
+            continue;
+        }
+        
+        // 处理不同区块的数据
+        if (strcmp(section, "Thresholds") == 0)
+        {
+            // A1=50 格式的阈值数据（0-100范围）
+            char key[10];
+            unsigned int displayValue;
+            if (sscanf(line, "%[^=]=%u", key, &displayValue) == 2)
+            {
+                // 查找区域索引
+                for (int i = 0; i < TOUCH_REGIONS; i++)
+                {
+                    if (strcmp(key, blockLabels[i]) == 0 && displayValue <= 100)
+                    {
+                        // 将0-100的显示值转换回0-65535的实际值
+                        touchThreshold[i] = display_to_threshold((uint8_t)displayValue);
+                        thresholdsChanged = true;
+                        break;
+                    }
+                }
+            }
+        }
+        else if (strcmp(section, "TouchSheet") == 0)
+        {
+            // Channel0=A1 格式的触摸映射数据
+            char key[20];
+            char blockId[10];
+            if (sscanf(line, "%[^=]=%s", key, blockId) == 2)
+            {
+                int channel;
+                if (sscanf(key, "Channel%d", &channel) == 1 && channel >= 0 && channel < TOUCH_REGIONS)
+                {
+                    // 查找区块标识对应的索引
+                    for (int i = 0; i < TOUCH_REGIONS; i++)
+                    {
+                        if (strcmp(blockId, blockLabels[i]) == 0)
+                        {
+                            touchSheet[channel] = i;
+                            touchSheetChanged = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fclose(file);
+    
+    // 如果阈值数据已更改，应用到设备
+    bool thresholdsSuccess = false;
+    bool touchSheetSuccess = false;
+    
+    if (thresholdsChanged)
+    {
+        if (deviceState1p == DEVICE_OK)
+        {
+            // 应用阈值到1P设备
+            for (int i = 0; i < TOUCH_REGIONS; i++)
+            {
+                SendThreshold(hPort1, &response1, i);
+                Sleep(10); // 小延迟以避免通信问题
+            }
+            thresholdsSuccess = true;
+        }
+        
+        if (deviceState2p == DEVICE_OK)
+        {
+            // 应用阈值到2P设备
+            for (int i = 0; i < TOUCH_REGIONS; i++)
+            {
+                SendThreshold(hPort2, &response2, i);
+                Sleep(10);
+            }
+            thresholdsSuccess = true;
+        }
+    }
+    
+    // 如果触摸映射已更改，应用到设备
+    if (touchSheetChanged)
+    {
+        if (deviceState1p == DEVICE_OK)
+        {
+            touchSheetSuccess = WriteTouchSheet(hPort1, &response1);
+        }
+        
+        if (deviceState2p == DEVICE_OK && !touchSheetSuccess)
+        {
+            touchSheetSuccess = WriteTouchSheet(hPort2, &response2);
+        }
+    }
+
+    // 显示结果信息
+    int promptY = 23;
+    for (int i = promptY; i < promptY + 3; i++)
+    {
+        ClearLine(i);
+    }
+    
+    SetCursorPosition(0, promptY);
+    if (thresholdsChanged || touchSheetChanged)
+    {
+        if ((thresholdsChanged && thresholdsSuccess) || (touchSheetChanged && touchSheetSuccess))
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            printf("Settings loaded from curva.ini successfully!");
+        }
+        else
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+            printf("Settings loaded but could not be applied to device (device not connected)");
+        }
+    }
+    else
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+        printf("No valid settings found in curva.ini");
+    }
+    SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+    Sleep(2000);
+
+    // 清除消息
+    for (int i = promptY; i < promptY + 3; i++)
+    {
+        ClearLine(i);
+    }
 }
 
 /*
