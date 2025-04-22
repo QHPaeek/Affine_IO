@@ -1,6 +1,6 @@
-// Todo: 1. 确认触摸区域映射功能是否工作正常
-// 2. Raw读取
-// 3. 2P测试逻辑修正
+// Todo: 
+// 1. Raw读取
+// 2. 2P测试逻辑修正
 
 #include <windows.h>
 #include <stdio.h>
@@ -25,10 +25,10 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 // 常量定义
 #define TOUCH_REGIONS 34        // 触摸区域总数
 #define BUTTONS_COUNT 8         // 按钮总数
-#define THRESHOLD_DEFAULT 32768 // 默认阈值（65535的一半，对应显示值50）
+#define THRESHOLD_DEFAULT 32768 // 默认阈值
 
 // 版本号定义
-const char *VERSION = "v.EVALUATION.4"; // 添加版本号常量
+const char *VERSION = "v.EVALUATION.5"; 
 
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -141,7 +141,7 @@ void RemapTouchSheet();
 void SaveSettings();
 void LoadSettings();
 
-// 添加Kobato相关函数声明
+// Kobato函数声明
 void ConnectKobato();
 bool ReadKobatoStatus();
 void ReconnectKobato();
@@ -185,7 +185,6 @@ int main()
     cursorInfo.bVisible = FALSE;
     SetConsoleCursorInfo(hConsole, &cursorInfo);
 
-    // 清屏一次
     system("cls");
 
     // 初始化阈值为默认值（仅作为备份）
@@ -354,10 +353,8 @@ void ClearLine(int line)
     SetConsoleCursorPosition(hConsole, coord);
 }
 
-// 检查数据是否发生变化
 bool IsDataChanged()
 {
-    // 检查按钮状态是否变化
     if (prev_player1Buttons != player1Buttons ||
         prev_player2Buttons != player2Buttons ||
         prev_opButtons != opButtons)
@@ -368,7 +365,6 @@ bool IsDataChanged()
         return true;
     }
 
-    // 检查触摸状态是否变化
     bool touchChanged = false;
     for (int i = 0; i < 7; i++)
     {
@@ -911,7 +907,7 @@ void DisplayTouchPanelWindow()
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │                    B6B6                  B3B3                    │  │", triggeredRegions, count);
     SetCursorPosition(0, baseY++);
-    PrintTouchPanelTrigger("│  │        A6A6         B6      B5    B5      B3         A3A3        │  │", triggeredRegions, count);
+    PrintTouchPanelTrigger("│  │        A6A6         B6      B5    B4      B3         A3A3        │  │", triggeredRegions, count);
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │          A6                B5B5  B4B4                A3          │  │", triggeredRegions, count);
     SetCursorPosition(0, baseY++);
@@ -938,32 +934,52 @@ void DisplayTouchPanelWindow()
 
 void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8])
 {
-    // 从7个字节的触摸状态解析出8x8的触摸矩阵
-    int byteIndex = 0;
-    int bitIndex = 0;
-
-    memset(touchMatrix, 0, sizeof(bool) * 8 * 8); // 清零矩阵
-
-    for (int y = 0; y < 8 && byteIndex < 7; y++)
-    {
-        for (int x = 0; x < 8 && byteIndex < 7; x++)
-        {
-            // 每个字节存储多个触摸点状态
-            if (bitIndex >= 8)
-            {
-                bitIndex = 0;
-                byteIndex++;
-                if (byteIndex >= 7)
-                    break; // 防止越界
-            }
-
-            // 检查对应位是否为1
-            touchMatrix[y][x] = (state[byteIndex] & (1 << bitIndex)) != 0;
-            bitIndex++;
-        }
-        if (byteIndex >= 7)
-            break; // 防止越界
-    }
+    // 清零矩阵
+    memset(touchMatrix, 0, sizeof(bool) * 8 * 8);
+    
+    // A1-A8区域 (A1-A5在byte0, A6-A8在byte1)
+    touchMatrix[0][1] = (state[0] & 0x01) != 0;  // A1
+    touchMatrix[1][1] = (state[0] & 0x02) != 0;  // A2
+    touchMatrix[2][1] = (state[0] & 0x04) != 0;  // A3
+    touchMatrix[3][1] = (state[0] & 0x08) != 0;  // A4
+    touchMatrix[4][1] = (state[0] & 0x10) != 0;  // A5
+    touchMatrix[5][1] = (state[1] & 0x01) != 0;  // A6
+    touchMatrix[6][1] = (state[1] & 0x02) != 0;  // A7
+    touchMatrix[7][1] = (state[1] & 0x04) != 0;  // A8
+    
+    // B1-B8区域 (B1-B2在byte1, B3-B7在byte2, B8在byte3)
+    touchMatrix[0][3] = (state[1] & 0x08) != 0;  // B1
+    touchMatrix[1][3] = (state[1] & 0x10) != 0;  // B2
+    touchMatrix[2][3] = (state[2] & 0x01) != 0;  // B3
+    touchMatrix[3][3] = (state[2] & 0x02) != 0;  // B4
+    touchMatrix[4][3] = (state[2] & 0x04) != 0;  // B5
+    touchMatrix[5][3] = (state[2] & 0x08) != 0;  // B6
+    touchMatrix[6][3] = (state[2] & 0x10) != 0;  // B7
+    touchMatrix[7][3] = (state[3] & 0x01) != 0;  // B8
+    
+    // C1-C2区域
+    touchMatrix[0][4] = (state[3] & 0x02) != 0;  // C1
+    touchMatrix[1][4] = (state[3] & 0x04) != 0;  // C2
+    
+    // D1-D8区域 (D1-D2在byte3, D3-D7在byte4, D8在byte5)
+    touchMatrix[0][0] = (state[3] & 0x08) != 0;  // D1
+    touchMatrix[1][0] = (state[3] & 0x10) != 0;  // D2
+    touchMatrix[2][0] = (state[4] & 0x01) != 0;  // D3
+    touchMatrix[3][0] = (state[4] & 0x02) != 0;  // D4
+    touchMatrix[4][0] = (state[4] & 0x04) != 0;  // D5
+    touchMatrix[5][0] = (state[4] & 0x08) != 0;  // D6
+    touchMatrix[6][0] = (state[4] & 0x10) != 0;  // D7
+    touchMatrix[7][0] = (state[5] & 0x01) != 0;  // D8
+    
+    // E1-E8区域 (E1-E4在byte5, E5-E8在byte6)
+    touchMatrix[0][2] = (state[5] & 0x02) != 0;  // E1
+    touchMatrix[1][2] = (state[5] & 0x04) != 0;  // E2
+    touchMatrix[2][2] = (state[5] & 0x08) != 0;  // E3
+    touchMatrix[3][2] = (state[5] & 0x10) != 0;  // E4
+    touchMatrix[4][2] = (state[6] & 0x01) != 0;  // E5
+    touchMatrix[5][2] = (state[6] & 0x02) != 0;  // E6
+    touchMatrix[6][2] = (state[6] & 0x04) != 0;  // E7
+    touchMatrix[7][2] = (state[6] & 0x08) != 0;  // E8
 }
 
 void SetCursorPosition(int x, int y)
@@ -1034,12 +1050,11 @@ void UpdateDeviceState()
     }
     else if (deviceStateKobato == DEVICE_OK)
     {
-        // 定期刷新Kobato状态
         static DWORD lastKobatoUpdateTime = 0;
         DWORD currentTime = GetTickCount();
 
         if (currentTime - lastKobatoUpdateTime >= 3000)
-        { // 每3秒更新一次
+        { 
             lastKobatoUpdateTime = currentTime;
             if (!ReadKobatoStatus())
             {
@@ -1050,7 +1065,6 @@ void UpdateDeviceState()
     }
     else if (deviceStateKobato == DEVICE_FAIL)
     {
-        // 如果连接失败，尝试重连
         ReconnectKobato();
     }
 }
@@ -1060,7 +1074,6 @@ void ReconnectDevices()
     static DWORD lastReconnectTime = 0;
     DWORD currentTime = GetTickCount();
 
-    // 每1秒尝试重连一次
     if (currentTime - lastReconnectTime < 1000)
     {
         return;
@@ -1074,7 +1087,6 @@ void ReconnectDevices()
         // 关闭可能已打开的端口
         close_port(&hPort1);
 
-        // 设置为WAIT状态，表明正在等待重连
         deviceState1p = DEVICE_WAIT;
         dataChanged = true;
 
@@ -1156,7 +1168,6 @@ void ReconnectDevices()
 
 void UpdateTouchData()
 {
-    // 内部循环变量
     const int READ_ITERATIONS = 100;
     bool dataUpdated = false;
 
@@ -1193,7 +1204,7 @@ void UpdateTouchData()
         }
     }
 
-    // 读取2P数据 - 同样简化处理
+    // 读取2P数据
     if (deviceState2p == DEVICE_OK)
     {
         switch (serial_read_cmd(hPort2, &response2))
@@ -1607,7 +1618,6 @@ uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
     response->channel = (uint8_t)index;
     serial_writeresp(hPort, response);
 
-    // 使用多次迭代尝试读取响应
     const int READ_ITERATIONS = 100;
     DWORD startTime = GetTickCount();
     uint8_t cmd;
@@ -1620,16 +1630,15 @@ uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
             cmd = serial_read_cmd(hPort, response);
             if (cmd == SERIAL_CMD_READ_MONO_THRESHOLD)
             {
-                // 收到正确响应，处理大小端序
                 if (response->size >= 3 && response->channel == index)
                 {
-                    // 根据协议，阈值为低字节在前，高字节在后
+                    // 阈值为低字节在前，高字节在后
                     uint16_t value = (response->threshold[1] << 8) | response->threshold[0];
                     return value;
                 }
             }
         }
-        Sleep(1); // 避免CPU占用过高
+        Sleep(1); 
     }
 
     // 超时或未收到正确响应，返回默认值
@@ -1656,7 +1665,6 @@ bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index)
     response->threshold[1] = (value >> 8) & 0xFF;
     serial_writeresp(hPort, response);
 
-    // 使用多次迭代尝试读取响应
     const int READ_ITERATIONS = 100;
     DWORD startTime = GetTickCount();
     uint8_t cmd;
@@ -1677,7 +1685,7 @@ bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index)
                 return false;
             }
         }
-        Sleep(1); // 避免CPU占用过高
+        Sleep(1); 
     }
 
     // 超时或未收到正确响应
@@ -1788,7 +1796,7 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
             }
         }
 
-        Sleep(5); // 短暂等待，避免CPU占用过高
+        Sleep(5); 
 
     } while (currentTime - startTime < 2000);
 
@@ -1816,7 +1824,6 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
     memcpy(response->touch_sheet, touchSheet, TOUCH_REGIONS);
     serial_writeresp(hPort, response);
 
-    // 使用多次迭代尝试读取响应
     const int READ_ITERATIONS = 100;
     DWORD startTime = GetTickCount();
     uint8_t cmd;
@@ -1837,7 +1844,7 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
                 return false;
             }
         }
-        Sleep(1); // 避免CPU占用过高
+        Sleep(1); 
     }
 
     // 超时或未收到正确响应
@@ -2355,7 +2362,7 @@ void SaveSettings()
     fprintf(file, "Version=%s\n", VERSION);
     fprintf(file, "Date=%s\n\n", __DATE__);
 
-    // 写入阈值数据 - 转换为0-100范围
+    // 写入阈值数据
     fprintf(file, "[Thresholds]\n");
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
@@ -2363,7 +2370,7 @@ void SaveSettings()
         fprintf(file, "%s=%u\n", blockLabels[i], displayValue);
     }
 
-    // 写入触摸映射数据 - 使用区块标识符而非数字
+    // 写入触摸映射数据
     fprintf(file, "\n[TouchSheet]\n");
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
@@ -2473,7 +2480,6 @@ void LoadSettings()
         }
         else if (strcmp(section, "TouchSheet") == 0)
         {
-            // Channel0=A1 格式的触摸映射数据
             char key[20];
             char blockId[10];
             if (sscanf(line, "%[^=]=%s", key, blockId) == 2)
