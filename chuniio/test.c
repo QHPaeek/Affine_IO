@@ -189,6 +189,19 @@ int main()
     DisplaySectionTitle(hConsole, "IR States", 3, WIDTH * 6 + 2, 20);
 
     memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
+    
+    if(comPort[0] == 0){
+        int port_num = 1;
+        snprintf(comPort, 4, "COM%d", port_num);
+    }else if(comPort[4] == 0){
+    }else if(comPort[5] == 0){
+        int port_num = (comPort[3]-48)*10 + (comPort[4]-48);
+        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+    }else{
+        int port_num = (comPort[3]-48)*100 + (comPort[4]-48)*10 + (comPort[5]-48);
+        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+        
+    }
 
     if (*comPort == 0x48)
     {
