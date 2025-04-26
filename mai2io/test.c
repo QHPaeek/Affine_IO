@@ -28,7 +28,7 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 #define THRESHOLD_DEFAULT 32768 // 默认阈值
 
 // 版本号定义
-const char *VERSION = "v.EVALUATION.5"; 
+const char *VERSION = "v.EVALUATION.5.5"; 
 
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -1902,6 +1902,15 @@ void RemapTouchSheet()
         "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"  // 26-33
     };
 
+    bool duplicate[TOUCH_REGIONS] = {0};
+    for (int x = 0; x < TOUCH_REGIONS; x++) {
+        for (int y = x + 1; y < TOUCH_REGIONS; y++) {
+            if (touchSheet[x] == touchSheet[y]) {
+                duplicate[x] = duplicate[y] = true;
+            }
+        }
+    }
+
     // 显示当前映射
     SetCursorPosition(0, promptY);
     printf("┌───────────────────────────────────── Curva Touch Sheet Mapping ─────────────────────────────────────┐");
@@ -1911,15 +1920,17 @@ void RemapTouchSheet()
     printf("│o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o │");
     SetCursorPosition(0, promptY + 3);
     printf("│");
-    for (int i = 0; i < TOUCH_REGIONS - 1; i++)
-    {
-        if (touchSheet[i] < TOUCH_REGIONS)
-        {
-            printf("%-2s ", blockLabels[touchSheet[i]]); // 打印标签，留一个空格
-        }
-        else
-        {
-            printf("?? "); // 无效映射显示为 "?? "
+    for (int i = 0; i < TOUCH_REGIONS - 1; i++) {
+        if (touchSheet[i] < TOUCH_REGIONS) {
+            if (duplicate[i]) {
+                SetConsoleTextAttribute(hConsole, COLOR_RED);
+            }
+            printf("%-2s ", blockLabels[touchSheet[i]]);
+            if (duplicate[i]) {
+                SetConsoleTextAttribute(hConsole, defaultAttrs);
+            }
+        } else {
+            printf("?? ");  // 无效映射显示为 "?? "
         }
     }
     // 单独处理最后一个标签，不带空格
@@ -2041,6 +2052,17 @@ void RemapTouchSheet()
                            success1p ? "OK" : "FAIL",
                            (deviceState2p == DEVICE_OK) ? (success2p ? "OK" : "FAIL") : "N/A");
                     SetConsoleTextAttribute(hConsole, defaultAttrs);
+
+                    // Why I need these here?
+                    if (success1p && deviceState1p == DEVICE_OK)
+                    {
+                        serial_heart_beat(hPort1, &response1);
+                    }
+                    if (success2p && deviceState2p == DEVICE_OK)
+                    {
+                        serial_heart_beat(hPort2, &response2);
+                    }
+
                     Sleep(1500); // 短暂显示成功消息
                 }
                 else
@@ -2561,6 +2583,16 @@ void LoadSettings()
         {
             SetConsoleTextAttribute(hConsole, COLOR_GREEN);
             printf("Settings loaded from curva.ini successfully!");
+
+            if (deviceState1p == DEVICE_OK)
+            {
+                serial_heart_beat(hPort1, &response1);
+            }
+            if (deviceState2p == DEVICE_OK)
+            {
+                serial_heart_beat(hPort2, &response2);
+            }
+            
         }
         else
         {
