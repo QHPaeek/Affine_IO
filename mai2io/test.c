@@ -1,13 +1,18 @@
-// Todo: 
+// Todo:
 // 1. Raw读取
 // 2. 2P测试逻辑修正
 
+#define WIN32_LEAN_AND_MEAN
+#define INITGUID
 #include <windows.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <conio.h>
+#include <wchar.h>
 #include "serial.h"
 #include "dprintf.h"
+#include <setupapi.h>
+#include <devguid.h>
 
 // 外部变量
 extern char comPort1[13];
@@ -25,10 +30,12 @@ extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
 // 常量定义
 #define TOUCH_REGIONS 34        // 触摸区域总数
 #define BUTTONS_COUNT 8         // 按钮总数
-#define THRESHOLD_DEFAULT 32768 // 默认阈值
+#define THRESHOLD_DEFAULT 16384 // 默认阈值
+#define INIT_CONNECT_ATTEMPTS 5
+#define RECONNECT_INTERVAL 500
 
 // 版本号定义
-const char *VERSION = "v.EVALUATION.5.5"; 
+const char *VERSION = "v0.6";
 
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
@@ -47,8 +54,14 @@ typedef enum
 typedef enum
 {
     WINDOW_MAIN,
-    WINDOW_TOUCHPANEL
+    WINDOW_TOUCHPANEL,
+    WINDOW_FIRMWARE_UPDATE
 } WindowType;
+
+typedef struct
+{
+    bool isPlayer1;
+} DeviceConnectParams;
 
 // 全局变量
 WindowType currentWindow = WINDOW_MAIN;
@@ -82,6 +95,12 @@ uint8_t kobatoLedBrightness = 0;
 bool kobatoExtendEnabled = FALSE;
 bool kobatoReflectEnabled = FALSE;
 
+// 多按键检测相关变量
+// 光眼无法物理检测是否连接，只能程序测试
+DWORD buttonPressStartTime = 0; // 按键同时按下的起始时间
+bool buttonFailMode = false;    // 标记按键是否进入FAIL模式
+int previousButtonCount = 0;    // 之前按下的按键数量
+
 // 玩家输入状态
 uint8_t player1Buttons = 0;
 uint8_t player2Buttons = 0;
@@ -95,6 +114,7 @@ uint8_t prev_player2Buttons = 0;
 uint8_t prev_opButtons = 0;
 
 // 原始值数组
+// 这个现在没用
 uint8_t p1RawValue[34] = {0};
 uint8_t p2RawValue[34] = {0};
 
@@ -123,6 +143,7 @@ void UpdateDeviceState();
 void ReconnectDevices();
 void UpdateButtonLEDs();
 void UpdateTouchData();
+void UpdateMultiButtonState();
 void SetCursorPosition(int x, int y);
 void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8]);
 void DisplayThresholds();
@@ -146,18 +167,48 @@ void ConnectKobato();
 bool ReadKobatoStatus();
 void ReconnectKobato();
 
+void TryConnectDevice(bool isPlayer1);
+
 bool IsDataChanged();
 void ClearLine(int line);
 
+void DisplayFirmwareUpdateWindow();
+void StartFirmwareUpdate(void);
+bool FindFirmwareFile(void);
+void PrepareForFirmwareUpdate();
+void SetFirmwareStatusMessage(const char *msg);
+
+// 固件更新相关变量
+bool firmware_update_ready = false;          // 是否找到可更新的固件
+bool firmware_updating = false;              // 是否正在更新
+int firmware_update_progress = 0;            // 更新进度 (0-100)
+wchar_t firmware_version[32] = L"v1.000000"; // 固件版本
+wchar_t firmware_path[MAX_PATH] = {0};       // 固件路径
+char *firmware_status_message = NULL;        // 状态信息
+
+/* ----- 固件更新相关常量 ----- */
+#define VID_CH340 0x1A86
+#define PID_CH340_G 0x7523
+#define PID_CH340_X 0x55D4
+#define BAUDRATE_BOOT 115200
+#define PAGE_SZ 256
+#define ERASE_RETRY 3
+#define SYNC_TIMEOUT_MS 2000
+
+/* ----- 固件更新全局变量 ----- */
+static HANDLE hBootPort = INVALID_HANDLE_VALUE;
+static unsigned char *firmware_data = NULL;
+static unsigned int firmware_data_len = 0;
+
 // 阈值转换辅助函数
-static inline uint8_t threshold_to_display(uint16_t threshold)
+static inline uint16_t threshold_to_display(uint16_t threshold)
 {
-    return (uint8_t)((threshold * 100) / 65535);
+    return (uint16_t)((threshold * 999) / 32767);
 }
 
-static inline uint16_t display_to_threshold(uint8_t display)
+static inline uint16_t display_to_threshold(uint16_t display)
 {
-    return (uint16_t)((uint32_t)display * 65535 / 100);
+    return (uint16_t)((uint32_t)display * 32767 / 999);
 }
 
 int main()
@@ -194,84 +245,6 @@ int main()
     memset(comPort1, 0, 13);
     memset(comPort2, 0, 13);
 
-    // 尝试连接1P设备
-    memcpy(comPort1, GetSerialPortByVidPid(Vid, Pid_1p), 6);
-    if (comPort1[0] == 0)
-    {
-        // 如果无法通过VID/PID找到设备，使用默认COM端口
-        strcpy(comPort1, "\\\\.\\COM11");
-    }
-    else if (comPort1[4] == 0)
-    {
-        // 端口号小于10
-        int port_num = (comPort1[3] - '0');
-        snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
-    }
-    else if (comPort1[5] == 0)
-    {
-        // 两位数端口号
-        int port_num = (comPort1[3] - '0') * 10 + (comPort1[4] - '0');
-        snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
-    }
-    else
-    {
-        // 三位数端口号
-        int port_num = (comPort1[3] - '0') * 100 + (comPort1[4] - '0') * 10 + (comPort1[5] - '0');
-        snprintf(comPort1, 11, "\\\\.\\COM%d", port_num);
-    }
-
-    if (open_port(&hPort1, comPort1))
-    {
-        deviceState1p = DEVICE_OK;
-        serial_scan_start(hPort1, &response1);
-
-        // 成功连接后读取当前阈值
-        ReadAllThresholds(hPort1, &response1);
-
-        ReadTouchSheet(hPort1, &response1);
-    }
-    else
-    {
-        deviceState1p = DEVICE_WAIT;
-    }
-
-    // 尝试连接2P设备
-    memcpy(comPort2, GetSerialPortByVidPid(Vid, Pid_2p), 6);
-    if (comPort2[0] == 0)
-    {
-        // 如果无法通过VID/PID找到设备，使用默认COM端口
-        strcpy(comPort2, "\\\\.\\COM12");
-    }
-    else if (comPort2[4] == 0)
-    {
-        // 端口号小于10
-    }
-    else if (comPort2[5] == 0)
-    {
-        // 两位数端口号
-        int port_num = (comPort2[3] - 48) * 10 + (comPort2[4] - 48);
-        snprintf(comPort2, 10, "\\\\.\\COM%d", port_num);
-    }
-    else
-    {
-        // 三位数端口号
-        int port_num = (comPort2[3] - 48) * 100 + (comPort2[4] - 48) * 10 + (comPort2[5] - 48);
-        snprintf(comPort2, 11, "\\\\.\\COM%d", port_num);
-    }
-
-    // 修改2P设备连接部分
-    if (open_port(&hPort2, comPort2))
-    {
-        deviceState2p = DEVICE_OK;
-        serial_scan_start(hPort2, &response2);
-    }
-    else
-    {
-        deviceState2p = DEVICE_WAIT;
-    }
-
-    ConnectKobato(); // 初始连接Kobato设备
-
     // 第一次显示完整界面
     DisplayHeader(deviceState1p, deviceState2p);
     if (currentWindow == WINDOW_MAIN)
@@ -282,6 +255,12 @@ int main()
     {
         DisplayTouchPanelWindow();
     }
+
+    // 尝试连接设备
+    TryConnectDevice(true);  // 连接1P设备
+    TryConnectDevice(false); // 连接2P设备
+
+    ConnectKobato(); // 初始连接Kobato设备
 
     // 主循环
     while (running)
@@ -306,9 +285,13 @@ int main()
             {
                 DisplayMainWindow();
             }
-            else
+            else if (currentWindow == WINDOW_TOUCHPANEL)
             {
                 DisplayTouchPanelWindow();
+            }
+            else if (currentWindow == WINDOW_FIRMWARE_UPDATE)
+            {
+                DisplayFirmwareUpdateWindow();
             }
 
             dataChanged = false;
@@ -332,6 +315,12 @@ int main()
     if (hPortKobato != INVALID_HANDLE_VALUE)
     {
         CloseHandle(hPortKobato);
+    }
+
+    if (firmware_status_message)
+    {
+        free(firmware_status_message);
+        firmware_status_message = NULL;
     }
 
     // 显示光标
@@ -439,13 +428,17 @@ void DisplayHeader(DeviceState state1p, DeviceState state2p)
             printf(" | Press [N] to switch to %s if connected", usePlayer2 ? "1P" : "2P");
         }
     }
-    else
+    else if (currentWindow == WINDOW_TOUCHPANEL)
     {
         printf("Press [TAB] to switch to Main View");
         if (deviceState2p == DEVICE_OK)
         {
             printf(" | Press [N] to switch to %s if connected", usePlayer2 ? "1P" : "2P");
         }
+    }
+    else if (currentWindow == WINDOW_FIRMWARE_UPDATE)
+    {
+        printf("Press [B] to return to Main View");
     }
 }
 
@@ -464,11 +457,11 @@ void DisplayMainWindow()
     SetCursorPosition(0, 13);
     printf("└──────────────────────────────────────────────────────────────────────────┘   └──────────────────────┘");
 
-    SetCursorPosition(0, 15);
-    printf("┌────────────── LED Test ────────────┐    ┌─── Trigger Threshold Modify ───┐   ┌──── Side Buttons ────┐");
+    SetCursorPosition(0, 14);
+    printf("┌────────── Board Utilities ─────────┐    ┌────── Touch Panel Modify ──────┐   ┌──── Side Buttons ────┐");
 
     // LED测试状态
-    SetCursorPosition(0, 16);
+    SetCursorPosition(0, 15);
     printf("│  [F1] Buttons LED Test     ");
     if (ledButtonsTest)
     {
@@ -481,7 +474,7 @@ void DisplayMainWindow()
         printf("STOP   ");
     }
     SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf(" │    │  [F5] Modify Region Threshold  │   │ Select         ");
+    printf(" │    │  [F5] Modify Region Threshold  │   │ Select #1      ");
 
     // 显示Select 按钮状态
     if (opButtons & (1 << 4))
@@ -498,8 +491,8 @@ void DisplayMainWindow()
     printf("   │");
 
     // LED控制器测试
-    SetCursorPosition(0, 17);
-    printf("│  [F2] Controller LED Test  ");
+    SetCursorPosition(0, 16);
+    printf("│  [F2] FET # LED Test       ");
     if (ledControllerTest)
     {
         SetConsoleTextAttribute(hConsole, COLOR_GREEN);
@@ -511,10 +504,7 @@ void DisplayMainWindow()
         printf("STOP   ");
     }
     SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf(" │    │  [F6] Remap Touch Sheet       ");
-
-    SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf(" │   │ Reserve        ");
+    printf(" │    │  [F6] Remap Touch Sheet        │   │ Reserve        ");
 
     // 显示Reserve按钮状态
     if (opButtons & (1 << 3))
@@ -530,8 +520,9 @@ void DisplayMainWindow()
     SetConsoleTextAttribute(hConsole, defaultAttrs);
     printf("   │");
 
-    SetCursorPosition(0, 18);
-    printf("└────────────────────────────────────┘    └────────────────────────────────┘   │ Coin           ");
+    // 添加F3和F7功能
+    SetCursorPosition(0, 17);
+    printf("│  [F3] Update Curva Firmware        │    │  [F7] Modify Latency           │   │ Coin           ");
     // 显示Coin按钮状态
     if (opButtons & (1 << 2))
     {
@@ -546,10 +537,26 @@ void DisplayMainWindow()
     SetConsoleTextAttribute(hConsole, defaultAttrs);
     printf("   │");
 
-    SetCursorPosition(0, 19);
-    printf("┌─── Kobato Stats ────────────────────────────────────────────────────┐        │ Service        ");
+    SetCursorPosition(0, 18);
+    printf("└────────────────────────────────────┘    └────────────────────────────────┘   │ Service        ");
     // 显示Service按钮状态
     if (opButtons & (1 << 1))
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+        printf("ON ");
+    }
+    else
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("OFF");
+    }
+    SetConsoleTextAttribute(hConsole, defaultAttrs);
+    printf("   │");
+
+    SetCursorPosition(0, 19);
+    printf("┌─── Kobato Stats ────────────────────────────────────────────────────┐        │ Test           ");
+    // 显示Test按钮状态
+    if (opButtons & (1 << 0))
     {
         SetConsoleTextAttribute(hConsole, COLOR_GREEN);
         printf("ON ");
@@ -629,21 +636,7 @@ void DisplayMainWindow()
         printf("N/A");
     }
 
-    printf(" │        │ Test           ");
-
-    // 显示Test按钮状态
-    if (opButtons & (1 << 0))
-    {
-        SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-        printf("ON ");
-    }
-    else
-    {
-        SetConsoleTextAttribute(hConsole, COLOR_RED);
-        printf("OFF");
-    }
-    SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf("   │");
+    printf(" │        │   ONLY SEL#1 WORK    │");
 
     SetCursorPosition(0, 21);
     printf("└─────────────────────────────────────────────────────────────────────┘        └──────────────────────┘");
@@ -684,7 +677,7 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[0], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100  ", threshold_to_display(touchThreshold[18 + i]));
+        printf(" %3d/999  ", threshold_to_display(touchThreshold[18 + i]));
 
         // A区域
         if (touchMatrix[i][1])
@@ -693,7 +686,7 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[1], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100 │ ", threshold_to_display(touchThreshold[i]));
+        printf(" %3d/999 │ ", threshold_to_display(touchThreshold[i]));
 
         // E区域
         if (touchMatrix[i][2])
@@ -702,7 +695,7 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[2], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100  ", threshold_to_display(touchThreshold[26 + i]));
+        printf(" %3d/999  ", threshold_to_display(touchThreshold[26 + i]));
 
         // B区域
         if (touchMatrix[i][3])
@@ -711,7 +704,7 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[3], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf("  %2d/100 │", threshold_to_display(touchThreshold[8 + i]));
+        printf(" %3d/999 │", threshold_to_display(touchThreshold[8 + i]));
 
         // C区域
         if (i < 2) // C1 (Index 16), C2 (Index 17)
@@ -723,15 +716,15 @@ void DisplayThresholds()
             }
             printf("%s%d", labels[4], i + 1);
             SetConsoleTextAttribute(hConsole, defaultAttrs);
-            printf("  %2d/100             │", threshold_to_display(touchThreshold[16 + i]));
+            printf(" %3d/999             │", threshold_to_display(touchThreshold[16 + i]));
         }
         else if (i == 6)
         {
-            printf("   OUT -> MID -> INNER  │");
+            printf("  OUT -> MID -> INNER   │");
         }
         else if (i == 7)
         {
-            printf("     Current/Trigger    │");
+            printf("     Trigger / MAX      │");
         }
         else
         {
@@ -747,16 +740,25 @@ void DisplayThresholds()
             // 彩色显示按钮状态
             if (buttons & (1 << i))
             {
-                SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-                printf("ON ");
+                // 检查是否处于FAIL模式
+                if (buttonFailMode)
+                {
+                    SetConsoleTextAttribute(hConsole, COLOR_RED);
+                    printf("FAIL");
+                }
+                else
+                {
+                    SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+                    printf("ON  ");
+                }
             }
             else
             {
                 SetConsoleTextAttribute(hConsole, COLOR_RED);
-                printf("OFF");
+                printf("OFF ");
             }
             SetConsoleTextAttribute(hConsole, defaultAttrs);
-            printf("   │");
+            printf("  │");
         }
         else
         {
@@ -936,50 +938,50 @@ void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8])
 {
     // 清零矩阵
     memset(touchMatrix, 0, sizeof(bool) * 8 * 8);
-    
+
     // A1-A8区域 (A1-A5在byte0, A6-A8在byte1)
-    touchMatrix[0][1] = (state[0] & 0x01) != 0;  // A1
-    touchMatrix[1][1] = (state[0] & 0x02) != 0;  // A2
-    touchMatrix[2][1] = (state[0] & 0x04) != 0;  // A3
-    touchMatrix[3][1] = (state[0] & 0x08) != 0;  // A4
-    touchMatrix[4][1] = (state[0] & 0x10) != 0;  // A5
-    touchMatrix[5][1] = (state[1] & 0x01) != 0;  // A6
-    touchMatrix[6][1] = (state[1] & 0x02) != 0;  // A7
-    touchMatrix[7][1] = (state[1] & 0x04) != 0;  // A8
-    
+    touchMatrix[0][1] = (state[0] & 0x01) != 0; // A1
+    touchMatrix[1][1] = (state[0] & 0x02) != 0; // A2
+    touchMatrix[2][1] = (state[0] & 0x04) != 0; // A3
+    touchMatrix[3][1] = (state[0] & 0x08) != 0; // A4
+    touchMatrix[4][1] = (state[0] & 0x10) != 0; // A5
+    touchMatrix[5][1] = (state[1] & 0x01) != 0; // A6
+    touchMatrix[6][1] = (state[1] & 0x02) != 0; // A7
+    touchMatrix[7][1] = (state[1] & 0x04) != 0; // A8
+
     // B1-B8区域 (B1-B2在byte1, B3-B7在byte2, B8在byte3)
-    touchMatrix[0][3] = (state[1] & 0x08) != 0;  // B1
-    touchMatrix[1][3] = (state[1] & 0x10) != 0;  // B2
-    touchMatrix[2][3] = (state[2] & 0x01) != 0;  // B3
-    touchMatrix[3][3] = (state[2] & 0x02) != 0;  // B4
-    touchMatrix[4][3] = (state[2] & 0x04) != 0;  // B5
-    touchMatrix[5][3] = (state[2] & 0x08) != 0;  // B6
-    touchMatrix[6][3] = (state[2] & 0x10) != 0;  // B7
-    touchMatrix[7][3] = (state[3] & 0x01) != 0;  // B8
-    
+    touchMatrix[0][3] = (state[1] & 0x08) != 0; // B1
+    touchMatrix[1][3] = (state[1] & 0x10) != 0; // B2
+    touchMatrix[2][3] = (state[2] & 0x01) != 0; // B3
+    touchMatrix[3][3] = (state[2] & 0x02) != 0; // B4
+    touchMatrix[4][3] = (state[2] & 0x04) != 0; // B5
+    touchMatrix[5][3] = (state[2] & 0x08) != 0; // B6
+    touchMatrix[6][3] = (state[2] & 0x10) != 0; // B7
+    touchMatrix[7][3] = (state[3] & 0x01) != 0; // B8
+
     // C1-C2区域
-    touchMatrix[0][4] = (state[3] & 0x02) != 0;  // C1
-    touchMatrix[1][4] = (state[3] & 0x04) != 0;  // C2
-    
+    touchMatrix[0][4] = (state[3] & 0x02) != 0; // C1
+    touchMatrix[1][4] = (state[3] & 0x04) != 0; // C2
+
     // D1-D8区域 (D1-D2在byte3, D3-D7在byte4, D8在byte5)
-    touchMatrix[0][0] = (state[3] & 0x08) != 0;  // D1
-    touchMatrix[1][0] = (state[3] & 0x10) != 0;  // D2
-    touchMatrix[2][0] = (state[4] & 0x01) != 0;  // D3
-    touchMatrix[3][0] = (state[4] & 0x02) != 0;  // D4
-    touchMatrix[4][0] = (state[4] & 0x04) != 0;  // D5
-    touchMatrix[5][0] = (state[4] & 0x08) != 0;  // D6
-    touchMatrix[6][0] = (state[4] & 0x10) != 0;  // D7
-    touchMatrix[7][0] = (state[5] & 0x01) != 0;  // D8
-    
+    touchMatrix[0][0] = (state[3] & 0x08) != 0; // D1
+    touchMatrix[1][0] = (state[3] & 0x10) != 0; // D2
+    touchMatrix[2][0] = (state[4] & 0x01) != 0; // D3
+    touchMatrix[3][0] = (state[4] & 0x02) != 0; // D4
+    touchMatrix[4][0] = (state[4] & 0x04) != 0; // D5
+    touchMatrix[5][0] = (state[4] & 0x08) != 0; // D6
+    touchMatrix[6][0] = (state[4] & 0x10) != 0; // D7
+    touchMatrix[7][0] = (state[5] & 0x01) != 0; // D8
+
     // E1-E8区域 (E1-E4在byte5, E5-E8在byte6)
-    touchMatrix[0][2] = (state[5] & 0x02) != 0;  // E1
-    touchMatrix[1][2] = (state[5] & 0x04) != 0;  // E2
-    touchMatrix[2][2] = (state[5] & 0x08) != 0;  // E3
-    touchMatrix[3][2] = (state[5] & 0x10) != 0;  // E4
-    touchMatrix[4][2] = (state[6] & 0x01) != 0;  // E5
-    touchMatrix[5][2] = (state[6] & 0x02) != 0;  // E6
-    touchMatrix[6][2] = (state[6] & 0x04) != 0;  // E7
-    touchMatrix[7][2] = (state[6] & 0x08) != 0;  // E8
+    touchMatrix[0][2] = (state[5] & 0x02) != 0; // E1
+    touchMatrix[1][2] = (state[5] & 0x04) != 0; // E2
+    touchMatrix[2][2] = (state[5] & 0x08) != 0; // E3
+    touchMatrix[3][2] = (state[5] & 0x10) != 0; // E4
+    touchMatrix[4][2] = (state[6] & 0x01) != 0; // E5
+    touchMatrix[5][2] = (state[6] & 0x02) != 0; // E6
+    touchMatrix[6][2] = (state[6] & 0x04) != 0; // E7
+    touchMatrix[7][2] = (state[6] & 0x08) != 0; // E8
 }
 
 void SetCursorPosition(int x, int y)
@@ -1054,7 +1056,7 @@ void UpdateDeviceState()
         DWORD currentTime = GetTickCount();
 
         if (currentTime - lastKobatoUpdateTime >= 3000)
-        { 
+        {
             lastKobatoUpdateTime = currentTime;
             if (!ReadKobatoStatus())
             {
@@ -1069,12 +1071,91 @@ void UpdateDeviceState()
     }
 }
 
+void TryConnectDevice(bool isPlayer1)
+{
+    HANDLE *phPort = isPlayer1 ? &hPort1 : &hPort2;
+    char *comPort = isPlayer1 ? comPort1 : comPort2;
+    char *vid = Vid;
+    char *pid = isPlayer1 ? Pid_1p : Pid_2p;
+    DeviceState *pDeviceState = isPlayer1 ? &deviceState1p : &deviceState2p;
+    serial_packet_t *pResponse = isPlayer1 ? &response1 : &response2;
+
+    // Sleep(50);
+
+    // 查找设备COM端口
+    memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
+
+    // 如果没找到设备，就保持WAIT状态，不尝试默认端口
+    if (comPort[0] == 0)
+    {
+        *pDeviceState = DEVICE_WAIT;
+        return;
+    }
+    else
+    {
+        // 统一处理COM端口号
+        int port_num;
+        if (comPort[4] == 0)
+            port_num = (comPort[3] - '0'); // 单位数
+        else if (comPort[5] == 0)
+            port_num = (comPort[3] - '0') * 10 + (comPort[4] - '0'); // 两位数
+        else
+            port_num = (comPort[3] - '0') * 100 + (comPort[4] - '0') * 10 + (comPort[5] - '0'); // 三位数
+
+        snprintf(comPort, 12, "\\\\.\\COM%d", port_num);
+    }
+
+    // 多次尝试连接
+    bool connected = false;
+
+    for (int attempt = 0; attempt < INIT_CONNECT_ATTEMPTS && !connected; attempt++)
+    {
+        if (open_port(phPort, comPort))
+        {
+            *pDeviceState = DEVICE_OK;
+            serial_scan_start(*phPort, pResponse);
+
+            if (isPlayer1)
+            {
+                ReadAllThresholds(*phPort, pResponse);
+                ReadTouchSheet(*phPort, pResponse);
+            }
+
+            connected = true;
+        }
+        else if (attempt < INIT_CONNECT_ATTEMPTS - 1)
+        {
+            // Sleep(50);
+
+            // 每次重试前重新搜索设备
+            memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
+            if (comPort[0] != 0)
+            {
+                int port_num;
+                if (comPort[4] == 0)
+                    port_num = (comPort[3] - '0');
+                else if (comPort[5] == 0)
+                    port_num = (comPort[3] - '0') * 10 + (comPort[4] - '0');
+                else
+                    port_num = (comPort[3] - '0') * 100 + (comPort[4] - '0') * 10 + (comPort[5] - '0');
+
+                snprintf(comPort, 12, "\\\\.\\COM%d", port_num);
+            }
+        }
+    }
+
+    if (!connected)
+    {
+        *pDeviceState = DEVICE_WAIT;
+    }
+}
+
 void ReconnectDevices()
 {
     static DWORD lastReconnectTime = 0;
     DWORD currentTime = GetTickCount();
 
-    if (currentTime - lastReconnectTime < 1000)
+    if (currentTime - lastReconnectTime < RECONNECT_INTERVAL)
     {
         return;
     }
@@ -1090,39 +1171,46 @@ void ReconnectDevices()
         deviceState1p = DEVICE_WAIT;
         dataChanged = true;
 
+        // Sleep(100);
         memcpy(comPort1, GetSerialPortByVidPid(Vid, Pid_1p), 6);
+
+        // 处理COM端口格式
         if (comPort1[0] == 0)
         {
-            strcpy(comPort1, "\\\\.\\COM8");
-        }
-        else if (comPort1[4] == 0)
-        {
-            // 端口号小于10
-            int port_num = (comPort1[3] - '0');
-            snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
-        }
-        else if (comPort1[5] == 0)
-        {
-            // 两位数端口号
-            int port_num = (comPort1[3] - '0') * 10 + (comPort1[4] - '0');
-            snprintf(comPort1, 10, "\\\\.\\COM%d", port_num);
+            // 如果无法通过VID/PID找到设备，不再使用默认端口
+            deviceState1p = DEVICE_WAIT;
+            dataChanged = true;
+            return;
         }
         else
         {
-            // 三位数端口号
-            int port_num = (comPort1[3] - '0') * 100 + (comPort1[4] - '0') * 10 + (comPort1[5] - '0');
-            snprintf(comPort1, 11, "\\\\.\\COM%d", port_num);
+            // 统一处理COM端口号，简化代码
+            int port_num;
+            if (comPort1[4] == 0)
+                port_num = (comPort1[3] - '0'); // 单位数
+            else if (comPort1[5] == 0)
+                port_num = (comPort1[3] - '0') * 10 + (comPort1[4] - '0'); // 两位数
+            else
+                port_num = (comPort1[3] - '0') * 100 + (comPort1[4] - '0') * 10 + (comPort1[5] - '0'); // 三位数
+
+            snprintf(comPort1, 12, "\\\\.\\COM%d", port_num);
         }
 
-        if (open_port(&hPort1, comPort1))
+        // 尝试多次连接
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            deviceState1p = DEVICE_OK;
-            serial_scan_start(hPort1, &response1);
+            if (open_port(&hPort1, comPort1))
+            {
+                deviceState1p = DEVICE_OK;
+                serial_scan_start(hPort1, &response1);
 
-            // 重连成功后读取当前阈值
-            ReadAllThresholds(hPort1, &response1);
-
-            dataChanged = true;
+                // 成功连接后读取当前阈值
+                ReadAllThresholds(hPort1, &response1);
+                ReadTouchSheet(hPort1, &response1);
+                dataChanged = true;
+                break;
+            }
+            Sleep(50); // 短暂等待再次尝试
         }
         // 如果重连失败，保持WAIT状态
     }
@@ -1132,37 +1220,42 @@ void ReconnectDevices()
     {
         close_port(&hPort2);
 
-        // 设置为WAIT状态，表明正在等待重连
         deviceState2p = DEVICE_WAIT;
         dataChanged = true;
 
+        // Sleep(100);
         memcpy(comPort2, GetSerialPortByVidPid(Vid, Pid_2p), 6);
+
+        // 处理COM端口格式（使用相同的简化逻辑）
         if (comPort2[0] == 0)
         {
-            strcpy(comPort2, "\\\\.\\COM9");
-        }
-        else if (comPort2[4] == 0)
-        {
-            // 端口号小于10
-        }
-        else if (comPort2[5] == 0)
-        {
-            int port_num = (comPort2[3] - 48) * 10 + (comPort2[4] - 48);
-            snprintf(comPort2, 10, "\\\\.\\COM%d", port_num);
+            strcpy(comPort2, "\\\\.\\COM12");
         }
         else
         {
-            int port_num = (comPort2[3] - 48) * 100 + (comPort2[4] - 48) * 10 + (comPort2[5] - 48);
-            snprintf(comPort2, 11, "\\\\.\\COM%d", port_num);
+            int port_num;
+            if (comPort2[4] == 0)
+                port_num = (comPort2[3] - '0');
+            else if (comPort2[5] == 0)
+                port_num = (comPort2[3] - '0') * 10 + (comPort2[4] - '0');
+            else
+                port_num = (comPort2[3] - '0') * 100 + (comPort2[4] - '0') * 10 + (comPort2[5] - '0');
+
+            snprintf(comPort2, 12, "\\\\.\\COM%d", port_num);
         }
 
-        if (open_port(&hPort2, comPort2))
+        // 尝试多次连接
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            deviceState2p = DEVICE_OK;
-            serial_scan_start(hPort2, &response2);
-            dataChanged = true;
+            if (open_port(&hPort2, comPort2))
+            {
+                deviceState2p = DEVICE_OK;
+                serial_scan_start(hPort2, &response2);
+                dataChanged = true;
+                break;
+            }
+            Sleep(50); // 短暂等待再次尝试
         }
-        // 如果重连失败，保持WAIT状态
     }
 }
 
@@ -1232,6 +1325,8 @@ void UpdateTouchData()
 
     // 更新LED状态
     UpdateButtonLEDs();
+
+    UpdateMultiButtonState();
 }
 
 void UpdateButtonLEDs()
@@ -1322,6 +1417,49 @@ void UpdateButtonLEDs()
     }
 }
 
+// 检测多按键同时按下状态
+void UpdateMultiButtonState()
+{
+    // 获取当前活跃的按键
+    uint8_t currentButtons = usePlayer2 ? player2Buttons : player1Buttons;
+
+    // 计算按下的按键数量
+    int buttonCount = 0;
+    for (int i = 0; i < BUTTONS_COUNT; i++)
+    {
+        if (currentButtons & (1 << i))
+        {
+            buttonCount++;
+        }
+    }
+
+    DWORD currentTime = GetTickCount();
+
+    if (buttonCount >= 3)
+    {
+        if (previousButtonCount < 3)
+        {
+            buttonPressStartTime = currentTime;
+        }
+        else if (currentTime - buttonPressStartTime >= 3000 && !buttonFailMode)
+        {
+            buttonFailMode = true;
+            dataChanged = true; // 强制刷新显示
+        }
+    }
+    else
+    {
+        // 按键数量少于3，重置状态
+        if (buttonFailMode)
+        {
+            buttonFailMode = false;
+            dataChanged = true; // 强制刷新显示
+        }
+    }
+
+    previousButtonCount = buttonCount;
+}
+
 void HandleKeyInput()
 {
     int key = _getch();
@@ -1329,15 +1467,29 @@ void HandleKeyInput()
     switch (key)
     {
     case 9: // Tab键
+        if (currentWindow == WINDOW_FIRMWARE_UPDATE)
+        {
+            // 在固件更新模式下不允许Tab切换
+            break;
+        }
         SwitchWindow();
         dataChanged = true;
         break;
     case 27: // Esc键
         running = false;
         break;
+    case 'b': // 从固件更新界面返回
+    case 'B':
+        if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
+        {
+            currentWindow = WINDOW_MAIN;
+            system("cls");
+            dataChanged = true;
+        }
+        break;
     case 'n': // 切换玩家
     case 'N':
-        if (deviceState2p == DEVICE_OK)
+        if (currentWindow != WINDOW_FIRMWARE_UPDATE && deviceState2p == DEVICE_OK)
         {
             SwitchPlayer();
             dataChanged = true;
@@ -1345,13 +1497,26 @@ void HandleKeyInput()
         break;
     case 'l': // 加载配置
     case 'L':
-        LoadSettings();
-        dataChanged = true;
+        if (currentWindow != WINDOW_FIRMWARE_UPDATE)
+        {
+            LoadSettings();
+            dataChanged = true;
+        }
         break;
     case 's': // 保存配置
     case 'S':
-        SaveSettings();
-        dataChanged = true;
+        if (currentWindow != WINDOW_FIRMWARE_UPDATE)
+        {
+            SaveSettings();
+            dataChanged = true;
+        }
+        break;
+    case '\r': // Enter键 - 开始固件更新
+        if (currentWindow == WINDOW_FIRMWARE_UPDATE && firmware_update_ready && !firmware_updating)
+        {
+            StartFirmwareUpdate();
+            dataChanged = true;
+        }
         break;
     case 0:
     case 224: // 功能键前缀
@@ -1359,16 +1524,28 @@ void HandleKeyInput()
         switch (key)
         {
         case 59: // F1
-            if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
+            if (currentWindow != WINDOW_FIRMWARE_UPDATE &&
+                ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK)))
             {
                 ledButtonsTest = !ledButtonsTest;
                 dataChanged = true;
             }
             break;
         case 60: // F2
-            if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
+            if (currentWindow != WINDOW_FIRMWARE_UPDATE &&
+                ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK)))
             {
                 ledControllerTest = !ledControllerTest;
+                dataChanged = true;
+            }
+            break;
+        case 61: // F3 - 更新固件
+            if (currentWindow == WINDOW_MAIN)
+            {
+                firmware_update_ready = FindFirmwareFile();
+                currentWindow = WINDOW_FIRMWARE_UPDATE;
+                system("cls");
+                SetFirmwareStatusMessage(NULL);
                 dataChanged = true;
             }
             break;
@@ -1390,6 +1567,13 @@ void HandleKeyInput()
                     RemapTouchSheet();
                     dataChanged = true;
                 }
+            }
+            break;
+        case 65: // F7 - Modify Latency (空实现)
+            if (currentWindow == WINDOW_MAIN)
+            {
+                // 空实现，仅更新UI状态
+                dataChanged = true;
             }
             break;
         }
@@ -1447,7 +1631,7 @@ void ModifyThreshold()
     SetCursorPosition(0, promptY);
     printf("┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n");
     SetCursorPosition(0, promptY + 1);
-    printf("┃     Please enter the Region ID and its Threshold that you want to change (e.g., E1/100)     ┃\n");
+    printf("┃     Please enter the Region ID and its Threshold that you want to change (e.g., E1/750)     ┃\n");
     SetCursorPosition(0, promptY + 2);
     printf("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n");
     SetCursorPosition(0, promptY + 3);
@@ -1470,28 +1654,125 @@ void ModifyThreshold()
 
     // 解析输入
     char regionType;
-    int regionNum, display_threshold;
-    if (sscanf(input, "%c%d/%d", &regionType, &regionNum, &display_threshold) == 3)
-    {
-        // 计算索引
-        int index = -1;
+    int regionNum = 0, display_threshold;
+    bool setAllRegion = false;
 
-        // 检查输入的区域类型和编号是否有效
-        bool validRegion = false;
-        if (regionType >= 'A' && regionType <= 'E')
+    // 尝试解析全区域格式 (如 "A/100")
+    if (sscanf(input, "%c/%d", &regionType, &display_threshold) == 2)
+    {
+        setAllRegion = true;
+    }
+    // 尝试解析单个区域格式 (如 "A1/100")
+    else if (sscanf(input, "%c%d/%d", &regionType, &regionNum, &display_threshold) != 3)
+    {
+        // 显示错误消息
+        ClearLine(promptY + 3);
+        SetCursorPosition(0, promptY + 3);
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("Invalid Input Format! ");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        Sleep(1000); // 短暂显示错误消息
+
+        // 隐藏光标
+        cursorInfo.bVisible = FALSE;
+        SetConsoleCursorInfo(hConsole, &cursorInfo);
+
+        // 清除提示区域
+        for (int i = promptY; i < promptY + 4; i++)
         {
-            if ((regionType == 'A' || regionType == 'B' || regionType == 'D' || regionType == 'E') && regionNum >= 1 && regionNum <= 8)
-            {
-                validRegion = true;
-            }
-            else if (regionType == 'C' && (regionNum == 1 || regionNum == 2))
-            {
-                validRegion = true;
-            }
+            ClearLine(i);
         }
 
-        if (validRegion)
+        // 强制更新显示
+        dataChanged = true;
+        return;
+    }
+
+    // 验证区域类型和阈值
+    bool validRegion = false;
+    if (regionType >= 'A' && regionType <= 'E')
+    {
+        if (setAllRegion)
         {
+            validRegion = true;
+        }
+        else if ((regionType == 'A' || regionType == 'B' || regionType == 'D' || regionType == 'E') &&
+                 regionNum >= 1 && regionNum <= 8)
+        {
+            validRegion = true;
+        }
+        else if (regionType == 'C' && (regionNum == 1 || regionNum == 2))
+        {
+            validRegion = true;
+        }
+    }
+
+    if (validRegion && display_threshold >= 0 && display_threshold <= 999)
+    {
+        uint16_t threshold_value = display_to_threshold(display_threshold);
+        bool success = false;
+        int indices[8]; // 最多8个索引
+        int count = 0;
+
+        if (setAllRegion)
+        {
+            switch (regionType)
+            {
+            case 'A':
+                // A1-A8对应索引0-7
+                for (int i = 0; i < 8; i++)
+                {
+                    indices[count++] = i;
+                }
+                break;
+            case 'B':
+                // B1-B8对应索引8-15
+                for (int i = 0; i < 8; i++)
+                {
+                    indices[count++] = 8 + i;
+                }
+                break;
+            case 'C':
+                // C1-C2对应索引16-17
+                indices[count++] = 16;
+                indices[count++] = 17;
+                break;
+            case 'D':
+                // D1-D8对应索引18-25
+                for (int i = 0; i < 8; i++)
+                {
+                    indices[count++] = 18 + i;
+                }
+                break;
+            case 'E':
+                // E1-E8对应索引26-33
+                for (int i = 0; i < 8; i++)
+                {
+                    indices[count++] = 26 + i;
+                }
+                break;
+            }
+
+            // 为所有索引设置阈值
+            for (int i = 0; i < count; i++)
+            {
+                touchThreshold[indices[i]] = threshold_value;
+
+                if (deviceState1p == DEVICE_OK)
+                {
+                    success |= SendThreshold(hPort1, &response1, indices[i]);
+                }
+                if (deviceState2p == DEVICE_OK)
+                {
+                    success |= SendThreshold(hPort2, &response2, indices[i]);
+                }
+            }
+        }
+        else
+        {
+            // 处理单个区域设置
+            int index = -1;
+
             switch (regionType)
             {
             case 'A':
@@ -1518,64 +1799,47 @@ void ModifyThreshold()
                 break;
             }
 
-            // 更新阈值并发送到设备 - 将0-100的显示值转换为0-65535的实际值
-            if (index >= 0 && index < TOUCH_REGIONS && display_threshold >= 0 && display_threshold <= 100)
+            if (index >= 0 && index < TOUCH_REGIONS)
             {
-                touchThreshold[index] = display_to_threshold(display_threshold);
-
-                bool success1p = false, success2p = false;
+                touchThreshold[index] = threshold_value;
 
                 if (deviceState1p == DEVICE_OK)
                 {
-                    success1p = SendThreshold(hPort1, &response1, index);
+                    success |= SendThreshold(hPort1, &response1, index);
                 }
                 if (deviceState2p == DEVICE_OK)
                 {
-                    success2p = SendThreshold(hPort2, &response2, index);
+                    success |= SendThreshold(hPort2, &response2, index);
                 }
+            }
+        }
 
-                // 显示成功消息
-                ClearLine(promptY + 3);
-                SetCursorPosition(0, promptY + 3);
+        // 显示成功消息
+        ClearLine(promptY + 3);
+        SetCursorPosition(0, promptY + 3);
 
-                if (success1p || success2p)
-                {
-                    SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-                    printf("Threshold Updated: %c%d = %d/100 (Raw: %d) 1P:%s 2P:%s",
-                           regionType, regionNum, display_threshold, touchThreshold[index],
-                           success1p ? "OK" : "FAIL",
-                           (deviceState2p == DEVICE_OK) ? (success2p ? "OK" : "FAIL") : "N/A");
-                    SetConsoleTextAttribute(hConsole, defaultAttrs);
-                    Sleep(1000); // 短暂显示成功消息
-                }
-                else
-                {
-                    SetConsoleTextAttribute(hConsole, COLOR_RED);
-                    printf("Failed to update threshold! Device did not confirm the change.");
-                    SetConsoleTextAttribute(hConsole, defaultAttrs);
-                    Sleep(2000); // 短暂显示错误消息
-                }
+        if (success)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            if (setAllRegion)
+            {
+                printf("All %c Region Thresholds have been updated to %d/999",
+                       regionType, display_threshold, threshold_value);
             }
             else
             {
-                // 显示错误消息
-                ClearLine(promptY + 3);
-                SetCursorPosition(0, promptY + 3);
-                SetConsoleTextAttribute(hConsole, COLOR_RED);
-                printf("Invalid Index or Threshold! The Threshold must be between 0-100.");
-                SetConsoleTextAttribute(hConsole, defaultAttrs);
-                Sleep(1000); // 短暂显示错误消息
+                printf("Threshold Updated: %c%d = %d/999 (Raw: %d)",
+                       regionType, regionNum, display_threshold, threshold_value);
             }
+            SetConsoleTextAttribute(hConsole, defaultAttrs);
+            Sleep(1500); // 短暂显示成功消息
         }
         else
         {
-            // 显示错误消息
-            ClearLine(promptY + 3);
-            SetCursorPosition(0, promptY + 3);
             SetConsoleTextAttribute(hConsole, COLOR_RED);
-            printf("Invalid Region ID! ");
+            printf("Failed to update threshold! Device did not confirm the change.");
             SetConsoleTextAttribute(hConsole, defaultAttrs);
-            Sleep(1000); // 短暂显示错误消息
+            Sleep(2000); // 短暂显示错误消息
         }
     }
     else
@@ -1584,7 +1848,14 @@ void ModifyThreshold()
         ClearLine(promptY + 3);
         SetCursorPosition(0, promptY + 3);
         SetConsoleTextAttribute(hConsole, COLOR_RED);
-        printf("Invalid Input Format! ");
+        if (!validRegion)
+        {
+            printf("Invalid Region ID! ");
+        }
+        else
+        {
+            printf("Invalid Index or Threshold! The Threshold must be between 0-999.");
+        }
         SetConsoleTextAttribute(hConsole, defaultAttrs);
         Sleep(1000); // 短暂显示错误消息
     }
@@ -1638,7 +1909,7 @@ uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
                 }
             }
         }
-        Sleep(1); 
+        Sleep(1);
     }
 
     // 超时或未收到正确响应，返回默认值
@@ -1685,7 +1956,7 @@ bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index)
                 return false;
             }
         }
-        Sleep(1); 
+        Sleep(1);
     }
 
     // 超时或未收到正确响应
@@ -1796,7 +2067,7 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
             }
         }
 
-        Sleep(5); 
+        Sleep(5);
 
     } while (currentTime - startTime < 2000);
 
@@ -1844,7 +2115,7 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
                 return false;
             }
         }
-        Sleep(1); 
+        Sleep(1);
     }
 
     // 超时或未收到正确响应
@@ -1903,9 +2174,12 @@ void RemapTouchSheet()
     };
 
     bool duplicate[TOUCH_REGIONS] = {0};
-    for (int x = 0; x < TOUCH_REGIONS; x++) {
-        for (int y = x + 1; y < TOUCH_REGIONS; y++) {
-            if (touchSheet[x] == touchSheet[y]) {
+    for (int x = 0; x < TOUCH_REGIONS; x++)
+    {
+        for (int y = x + 1; y < TOUCH_REGIONS; y++)
+        {
+            if (touchSheet[x] == touchSheet[y])
+            {
                 duplicate[x] = duplicate[y] = true;
             }
         }
@@ -1920,17 +2194,23 @@ void RemapTouchSheet()
     printf("│o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o  o │");
     SetCursorPosition(0, promptY + 3);
     printf("│");
-    for (int i = 0; i < TOUCH_REGIONS - 1; i++) {
-        if (touchSheet[i] < TOUCH_REGIONS) {
-            if (duplicate[i]) {
+    for (int i = 0; i < TOUCH_REGIONS - 1; i++)
+    {
+        if (touchSheet[i] < TOUCH_REGIONS)
+        {
+            if (duplicate[i])
+            {
                 SetConsoleTextAttribute(hConsole, COLOR_RED);
             }
             printf("%-2s ", blockLabels[touchSheet[i]]);
-            if (duplicate[i]) {
+            if (duplicate[i])
+            {
                 SetConsoleTextAttribute(hConsole, defaultAttrs);
             }
-        } else {
-            printf("?? ");  // 无效映射显示为 "?? "
+        }
+        else
+        {
+            printf("?? "); // 无效映射显示为 "?? "
         }
     }
     // 单独处理最后一个标签，不带空格
@@ -2115,6 +2395,8 @@ void RemapTouchSheet()
 // 连接Kobato设备并初始化
 void ConnectKobato()
 {
+    Sleep(200);
+
     // 尝试通过VID/PID获取Kobato设备的COM端口
     memcpy(comPortKobato, GetSerialPortByVidPid(Vid_Kobato, Pid_Kobato), 6);
     if (comPortKobato[0] == 0)
@@ -2124,33 +2406,40 @@ void ConnectKobato()
         return;
     }
 
-    // 处理端口号格式
+    // 处理端口号格式（使用简化的统一逻辑）
+    int port_num;
     if (comPortKobato[4] == 0)
-    {
-        // 端口号小于10
-        int port_num = (comPortKobato[3] - '0');
-        snprintf(comPortKobato, 10, "\\\\.\\COM%d", port_num);
-    }
+        port_num = (comPortKobato[3] - '0');
     else if (comPortKobato[5] == 0)
-    {
-        // 两位数端口号
-        int port_num = (comPortKobato[3] - '0') * 10 + (comPortKobato[4] - '0');
-        snprintf(comPortKobato, 10, "\\\\.\\COM%d", port_num);
-    }
+        port_num = (comPortKobato[3] - '0') * 10 + (comPortKobato[4] - '0');
     else
+        port_num = (comPortKobato[3] - '0') * 100 + (comPortKobato[4] - '0') * 10 + (comPortKobato[5] - '0');
+
+    snprintf(comPortKobato, 12, "\\\\.\\COM%d", port_num);
+
+    // 重试连接几次
+    HANDLE tempPort = INVALID_HANDLE_VALUE;
+    bool connected = false;
+
+    for (int attempt = 0; attempt < 3 && !connected; attempt++)
     {
-        // 三位数端口号
-        int port_num = (comPortKobato[3] - '0') * 100 + (comPortKobato[4] - '0') * 10 + (comPortKobato[5] - '0');
-        snprintf(comPortKobato, 11, "\\\\.\\COM%d", port_num);
+        // 打开串口
+        tempPort = CreateFile(comPortKobato, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (tempPort != INVALID_HANDLE_VALUE)
+        {
+            connected = true;
+            break;
+        }
+        Sleep(100);
     }
 
-    // 打开串口
-    hPortKobato = CreateFile(comPortKobato, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-    if (hPortKobato == INVALID_HANDLE_VALUE)
+    if (!connected)
     {
-        deviceStateKobato = DEVICE_WAIT; // 无法打开串口，可能设备未连接
+        deviceStateKobato = DEVICE_WAIT;
         return;
     }
+
+    hPortKobato = tempPort;
 
     // 找到了设备并打开了串口，从这一点开始如果通信失败则标记为FAIL而非WAIT
 
@@ -2361,7 +2650,7 @@ void SaveSettings()
         {
             ClearLine(i);
         }
-        
+
         SetCursorPosition(0, promptY);
         SetConsoleTextAttribute(hConsole, COLOR_RED);
         printf("Failed to save settings to curva.ini file!");
@@ -2415,7 +2704,7 @@ void SaveSettings()
     {
         ClearLine(i);
     }
-    
+
     SetCursorPosition(0, promptY);
     SetConsoleTextAttribute(hConsole, COLOR_GREEN);
     printf("Settings successfully saved to curva.ini file!");
@@ -2440,7 +2729,7 @@ void LoadSettings()
         {
             ClearLine(i);
         }
-        
+
         SetCursorPosition(0, promptY);
         SetConsoleTextAttribute(hConsole, COLOR_RED);
         printf("Failed to load settings: curva.ini file not found!");
@@ -2466,11 +2755,11 @@ void LoadSettings()
     while (fgets(line, sizeof(line), file) != NULL)
     {
         line[strcspn(line, "\r\n")] = 0; // 移除换行符
-        
+
         // 跳过空行和注释行
         if (strlen(line) <= 1 || line[0] == ';' || line[0] == '#')
             continue;
-            
+
         // 判断是否为区块标识
         if (line[0] == '[' && line[strlen(line) - 1] == ']')
         {
@@ -2478,11 +2767,11 @@ void LoadSettings()
             section[strlen(line) - 2] = '\0';
             continue;
         }
-        
+
         // 处理不同区块的数据
         if (strcmp(section, "Thresholds") == 0)
         {
-            // A1=50 格式的阈值数据（0-100范围）
+            // A1=500 格式的阈值数据（0-999范围）
             char key[10];
             unsigned int displayValue;
             if (sscanf(line, "%[^=]=%u", key, &displayValue) == 2)
@@ -2490,10 +2779,10 @@ void LoadSettings()
                 // 查找区域索引
                 for (int i = 0; i < TOUCH_REGIONS; i++)
                 {
-                    if (strcmp(key, blockLabels[i]) == 0 && displayValue <= 100)
+                    if (strcmp(key, blockLabels[i]) == 0 && displayValue <= 999)
                     {
-                        // 将0-100的显示值转换回0-65535的实际值
-                        touchThreshold[i] = display_to_threshold((uint8_t)displayValue);
+                        // 将0-999的显示值转换回0-65535的实际值
+                        touchThreshold[i] = display_to_threshold((uint16_t)displayValue);
                         thresholdsChanged = true;
                         break;
                     }
@@ -2525,11 +2814,11 @@ void LoadSettings()
     }
 
     fclose(file);
-    
+
     // 如果阈值数据已更改，应用到设备
     bool thresholdsSuccess = false;
     bool touchSheetSuccess = false;
-    
+
     if (thresholdsChanged)
     {
         if (deviceState1p == DEVICE_OK)
@@ -2542,7 +2831,7 @@ void LoadSettings()
             }
             thresholdsSuccess = true;
         }
-        
+
         if (deviceState2p == DEVICE_OK)
         {
             // 应用阈值到2P设备
@@ -2554,7 +2843,7 @@ void LoadSettings()
             thresholdsSuccess = true;
         }
     }
-    
+
     // 如果触摸映射已更改，应用到设备
     if (touchSheetChanged)
     {
@@ -2562,7 +2851,7 @@ void LoadSettings()
         {
             touchSheetSuccess = WriteTouchSheet(hPort1, &response1);
         }
-        
+
         if (deviceState2p == DEVICE_OK && !touchSheetSuccess)
         {
             touchSheetSuccess = WriteTouchSheet(hPort2, &response2);
@@ -2575,7 +2864,7 @@ void LoadSettings()
     {
         ClearLine(i);
     }
-    
+
     SetCursorPosition(0, promptY);
     if (thresholdsChanged || touchSheetChanged)
     {
@@ -2592,7 +2881,6 @@ void LoadSettings()
             {
                 serial_heart_beat(hPort2, &response2);
             }
-            
         }
         else
         {
@@ -2666,3 +2954,832 @@ void DisplayRawData(uint8_t *touchState, uint8_t *rawValue)
     }
 }
 */
+
+/* ----- CH340控制函数 ----- */
+static void set_dtr(HANDLE h, bool hi)
+{
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    EscapeCommFunction(h, hi ? SETDTR : CLRDTR);
+}
+
+static void set_rts(HANDLE h, bool hi)
+{
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    EscapeCommFunction(h, hi ? SETRTS : CLRRTS);
+}
+
+/* ----- 进入/退出启动加载程序 ----- */
+static void enter_boot(HANDLE h)
+{
+    set_dtr(h, true); /* BOOT0 = 1 */
+    set_rts(h, true); /* nRST = 0 */
+    Sleep(50);
+    set_rts(h, false); /* 释放复位 */
+    Sleep(100);
+}
+
+static void exit_boot(HANDLE h)
+{
+    set_dtr(h, false); /* BOOT0 = 0 */
+    set_rts(h, true);  /* nRST = 0 */
+    Sleep(50);
+    set_rts(h, false); /* nRST = 1 */
+    Sleep(100);
+}
+
+/* ----- 串口通信辅助函数 ----- */
+static bool tx_byte(HANDLE h, unsigned char b)
+{
+    DWORD w = 0;
+    return WriteFile(h, &b, 1, &w, NULL) && w == 1;
+}
+
+static bool rx_byte(HANDLE h, unsigned char *b, DWORD tout_ms)
+{
+    COMMTIMEOUTS tmo;
+    GetCommTimeouts(h, &tmo);
+    COMMTIMEOUTS orig = tmo;
+    tmo.ReadIntervalTimeout = MAXDWORD;
+    tmo.ReadTotalTimeoutConstant = tout_ms;
+    tmo.ReadTotalTimeoutMultiplier = 0;
+    SetCommTimeouts(h, &tmo);
+
+    DWORD r = 0;
+    BOOL ok = ReadFile(h, b, 1, &r, NULL);
+
+    SetCommTimeouts(h, &orig);
+    return ok && r == 1;
+}
+
+/* ----- Bootloader协议函数 ----- */
+static unsigned char xor_sum(const unsigned char *p, size_t n)
+{
+    unsigned char c = 0;
+    while (n--)
+        c ^= *p++;
+    return c;
+}
+
+static bool bl_sync(HANDLE h)
+{
+    unsigned char ack;
+    for (DWORD t = 0; t < (SYNC_TIMEOUT_MS / 50); ++t)
+    {
+        if (tx_byte(h, 0x7F) && rx_byte(h, &ack, 100) && ack == 0x79)
+            return true;
+        Sleep(50);
+    }
+    return false;
+}
+
+static bool bl_cmd(HANDLE h, unsigned char cmd)
+{
+    if (!tx_byte(h, cmd) || !tx_byte(h, cmd ^ 0xFF))
+        return false;
+    unsigned char ack;
+    return rx_byte(h, &ack, 200) && ack == 0x79;
+}
+
+static bool bl_mass_erase(HANDLE h)
+{
+    if (!bl_cmd(h, 0x44))
+        return false;
+    unsigned char seq[3] = {0xFF, 0xFF, 0x00};
+    seq[2] = xor_sum(seq, 2);
+    DWORD written;
+    if (!WriteFile(h, seq, 3, &written, NULL) || written != 3)
+        return false;
+    unsigned char ack;
+    return rx_byte(h, &ack, 5000) && ack == 0x79;
+}
+
+static bool bl_write_block(HANDLE h, uint32_t addr, const unsigned char *buf, size_t len)
+{
+    if (len == 0 || len > PAGE_SZ)
+        return false;
+    if (!bl_cmd(h, 0x31))
+        return false;
+
+    unsigned char a[5] = {
+        (unsigned char)((addr >> 24) & 0xFF),
+        (unsigned char)((addr >> 16) & 0xFF),
+        (unsigned char)((addr >> 8) & 0xFF),
+        (unsigned char)(addr & 0xFF),
+        0};
+    a[4] = xor_sum(a, 4);
+    DWORD written;
+    if (!WriteFile(h, a, 5, &written, NULL) || written != 5)
+        return false;
+
+    unsigned char ack;
+    if (!rx_byte(h, &ack, 200) || ack != 0x79)
+        return false;
+
+    unsigned char pkt[PAGE_SZ + 2];
+    pkt[0] = (unsigned char)(len - 1);
+    memcpy(pkt + 1, buf, len);
+    pkt[len + 1] = xor_sum(pkt, len + 1);
+    if (!WriteFile(h, pkt, len + 2, &written, NULL) || written != len + 2)
+        return false;
+
+    return rx_byte(h, &ack, 500) && ack == 0x79;
+}
+
+static bool is_ch340(DWORD vid, DWORD pid)
+{
+    return vid == VID_CH340 && (pid == PID_CH340_G || pid == PID_CH340_X);
+}
+
+/* ----- 查找和打开CH340设备 ----- */
+typedef struct
+{
+    char *port_result;
+    size_t result_size;
+    bool found;
+    bool multiple;
+    bool timeout;
+    volatile BOOL shouldExit;
+} CH340FindData;
+
+// 设备查找线程函数
+DWORD WINAPI FindCH340Thread(LPVOID lpParam)
+{
+    CH340FindData *findData = (CH340FindData *)lpParam;
+    findData->found = false;
+    findData->multiple = false;
+    findData->timeout = false;
+
+    HDEVINFO devs = SetupDiGetClassDevs(&GUID_DEVCLASS_PORTS, NULL, NULL, DIGCF_PRESENT);
+    if (devs == INVALID_HANDLE_VALUE)
+        return 1;
+
+    int ch340_count = 0;
+    char first_port[32] = {0};
+
+    SP_DEVINFO_DATA info = {.cbSize = sizeof(info)};
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &info); ++i)
+    {
+        char hwid[256] = {0};
+        DWORD n = 0;
+
+        if (ch340_count > 1)
+        {
+            findData->multiple = true;
+            SetupDiDestroyDeviceInfoList(devs);
+            return 0;
+        }
+
+        if (findData->shouldExit)
+        {
+            SetupDiDestroyDeviceInfoList(devs);
+            return 0;
+        }
+        if (!SetupDiGetDeviceRegistryPropertyA(devs, &info, SPDRP_HARDWAREID, NULL, (BYTE *)hwid, sizeof(hwid), &n))
+            continue;
+
+        // 检查是否是CH340设备
+        DWORD vid = 0, pid = 0;
+        if (sscanf(hwid, "USB\\VID_%4lx&PID_%4lx", &vid, &pid) != 2)
+            continue;
+
+        if (vid == VID_CH340 && (pid == PID_CH340_G || pid == PID_CH340_X))
+        {
+            // 找到一个CH340设备
+            ch340_count++;
+
+            // 如果发现多个设备，立即结束搜索
+            if (ch340_count > 1)
+            {
+                findData->multiple = true;
+                SetupDiDestroyDeviceInfoList(devs);
+                return 0;
+            }
+
+            // 获取设备友好名称
+            char friendly[256] = {0};
+            if (SetupDiGetDeviceRegistryPropertyA(devs, &info, SPDRP_FRIENDLYNAME, NULL, (BYTE *)friendly, sizeof(friendly), &n))
+            {
+                // 提取COM端口号
+                char *p = strrchr(friendly, '(');
+                if (p && strstr(p, "COM"))
+                {
+                    strncpy(first_port, p + 1, sizeof(first_port) - 1);
+                    char *end = strrchr(first_port, ')');
+                    if (end)
+                        *end = 0;
+
+                    // 保存结果
+                    strncpy(findData->port_result, first_port, findData->result_size);
+                    findData->found = true;
+                }
+            }
+        }
+    }
+
+    SetupDiDestroyDeviceInfoList(devs);
+    return 0;
+}
+
+static bool find_ch340_port(char *out, size_t cch)
+{
+    // 清空输出缓冲区
+    memset(out, 0, cch);
+
+    // 准备线程参数
+    CH340FindData findData;
+    findData.shouldExit = FALSE;
+    findData.port_result = out;
+    findData.result_size = cch;
+    findData.found = false;
+    findData.multiple = false;
+    findData.timeout = false;
+
+    // 创建一个独立线程执行设备枚举
+    HANDLE hThread = CreateThread(NULL, 0, FindCH340Thread, &findData, 0, NULL);
+    if (hThread == NULL)
+    {
+        return false;
+    }
+
+    const DWORD THREAD_TIMEOUT = 500;
+    DWORD waitResult = WaitForSingleObject(hThread, THREAD_TIMEOUT);
+
+    if (waitResult == WAIT_TIMEOUT)
+    {
+        findData.shouldExit = TRUE;
+        Sleep(100);
+        TerminateThread(hThread, 1);
+        CloseHandle(hThread);
+        strncpy(out, "TIMEOUT", cch);
+        return false;
+    }
+
+    // 线程已完成
+    CloseHandle(hThread);
+
+    // 检查多设备情况
+    if (findData.multiple)
+    {
+        strncpy(out, "MULTIPLE", cch);
+        return false;
+    }
+
+    // 检查是否找到设备
+    if (findData.found)
+    {
+        return true;
+    }
+
+    // 没有找到设备
+    return false;
+}
+
+/* ----- 打开串口进行固件更新 ----- */
+static bool open_boot_port(const char *name)
+{
+    char path[32];
+    snprintf(path, 32, "\\\\.\\%s", name);
+
+    hBootPort = CreateFile(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hBootPort == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    SetupComm(hBootPort, 4096, 4096);
+    DCB dcb = {.DCBlength = sizeof(dcb)};
+    if (!GetCommState(hBootPort, &dcb))
+        goto err;
+
+    dcb.BaudRate = BAUDRATE_BOOT;
+    dcb.Parity = EVENPARITY;
+    dcb.ByteSize = 8;
+    dcb.StopBits = ONESTOPBIT;
+    dcb.fParity = TRUE;
+    dcb.fDtrControl = DTR_CONTROL_DISABLE;
+    dcb.fRtsControl = RTS_CONTROL_DISABLE;
+    dcb.fOutxCtsFlow = dcb.fOutxDsrFlow = dcb.fOutX = dcb.fInX = FALSE;
+    if (!SetCommState(hBootPort, &dcb))
+        goto err;
+
+    COMMTIMEOUTS tmo = {MAXDWORD, 100, 0, 500, 0};
+    SetCommTimeouts(hBootPort, &tmo);
+    PurgeComm(hBootPort, PURGE_TXCLEAR | PURGE_RXCLEAR);
+
+    set_dtr(hBootPort, false);
+    set_rts(hBootPort, false);
+    Sleep(100);
+    return true;
+
+err:
+    CloseHandle(hBootPort);
+    hBootPort = INVALID_HANDLE_VALUE;
+    return false;
+}
+
+/* ----- 释放固件资源 ----- */
+static void cleanup_firmware()
+{
+    if (firmware_data)
+    {
+        free(firmware_data);
+        firmware_data = NULL;
+    }
+    if (hBootPort != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(hBootPort);
+        hBootPort = INVALID_HANDLE_VALUE;
+    }
+}
+
+/* ----- 查找并加载固件文件 ----- */
+bool FindFirmwareFile(void)
+{
+    // 获取可执行文件目录
+    wchar_t exe_path[MAX_PATH];
+    GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+
+    // 提取目录部分
+    wchar_t *last_slash = wcsrchr(exe_path, L'\\');
+    if (last_slash)
+    {
+        *(last_slash + 1) = L'\0'; // 截断文件名，只保留路径
+    }
+
+    // 构建搜索模式
+    wchar_t search_pattern[MAX_PATH];
+    wcscpy_s(search_pattern, MAX_PATH, exe_path);
+    wcscat_s(search_pattern, MAX_PATH, L"Curva_G431_*.bin");
+
+    WIN32_FIND_DATAW find_data;
+    HANDLE find_handle = FindFirstFileW(search_pattern, &find_data);
+
+    if (find_handle == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    unsigned long long latest_version = 0;
+    wchar_t latest_filename[MAX_PATH] = {0};
+
+    do
+    {
+        if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            // 处理文件名，提取版本号
+            const wchar_t *prefix = L"Curva_G431_";
+            size_t prefix_len = wcslen(prefix);
+
+            if (wcsncmp(find_data.cFileName, prefix, prefix_len) == 0)
+            {
+                // 找到前缀，提取版本部分
+                const wchar_t *version_start = find_data.cFileName + prefix_len;
+                size_t version_len = wcslen(version_start);
+
+                // 移除可能的.bin后缀
+                if (version_len > 4 && wcscmp(version_start + version_len - 4, L".bin") == 0)
+                {
+                    version_len -= 4;
+                }
+
+                // 转换为数字进行比较
+                wchar_t version_str[32] = {0};
+                if (version_len < 32)
+                {
+                    wcsncpy_s(version_str, 32, version_start, version_len);
+                    unsigned long long version = wcstoull(version_str, NULL, 10);
+
+                    if (version > latest_version)
+                    {
+                        latest_version = version;
+                        wcscpy_s(latest_filename, MAX_PATH, find_data.cFileName);
+                    }
+                }
+            }
+        }
+    } while (FindNextFileW(find_handle, &find_data) != 0);
+
+    FindClose(find_handle);
+
+    if (latest_filename[0] == 0)
+    {
+        return false;
+    }
+
+    // 构建完整文件路径
+    wcscpy_s(firmware_path, MAX_PATH, exe_path);
+    wcscat_s(firmware_path, MAX_PATH, latest_filename);
+
+    // 提取版本号
+    wchar_t version_str[32] = {0};
+    const wchar_t *prefix = L"Curva_G431_";
+    size_t prefix_len = wcslen(prefix);
+
+    if (wcslen(latest_filename) > prefix_len)
+    {
+        wcscpy_s(version_str, 32, latest_filename + prefix_len);
+        // 移除.bin后缀
+        wchar_t *dot = wcsrchr(version_str, L'.');
+        if (dot)
+            *dot = 0;
+
+        swprintf_s(firmware_version, 32, L"v1.%s", version_str);
+    }
+
+    // 加载固件数据
+    FILE *f = NULL;
+    if (_wfopen_s(&f, firmware_path, L"rb") != 0 || !f)
+    {
+        return false;
+    }
+
+    // 获取文件大小
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size <= 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    // 释放之前的固件
+    if (firmware_data)
+    {
+        free(firmware_data);
+    }
+
+    // 分配内存
+    firmware_data = (unsigned char *)malloc(file_size);
+    if (!firmware_data)
+    {
+        fclose(f);
+        return false;
+    }
+
+    firmware_data_len = (unsigned int)file_size;
+
+    // 读取文件内容
+    if (fread(firmware_data, 1, file_size, f) != (size_t)file_size)
+    {
+        fclose(f);
+        free(firmware_data);
+        firmware_data = NULL;
+        return false;
+    }
+
+    fclose(f);
+    return true;
+}
+
+// 设置更新状态消息
+void SetFirmwareStatusMessage(const char *msg)
+{
+    if (firmware_status_message)
+    {
+        free(firmware_status_message);
+    }
+
+    if (msg)
+    {
+        size_t len = strlen(msg) + 1;
+        firmware_status_message = (char *)malloc(len);
+        if (firmware_status_message)
+        {
+            strcpy_s(firmware_status_message, len, msg);
+        }
+    }
+    else
+    {
+        firmware_status_message = NULL;
+    }
+
+    dataChanged = true;
+}
+
+// 固件更新线程
+DWORD WINAPI UpdateFirmwareThread(LPVOID lpParam)
+{
+    firmware_updating = true;
+    firmware_update_progress = 0;
+    char com_port[32] = {0};
+
+    SetFirmwareStatusMessage("Searching for devices...");
+    Sleep(500);
+
+    // 寻找设备
+    if (!find_ch340_port(com_port, sizeof(com_port)))
+    {
+        // 检查是否是多设备错误
+        if (strcmp(com_port, "MULTIPLE") == 0)
+        {
+            SetFirmwareStatusMessage("Error: Multiple CH340 devices detected.");
+        }
+        else if (strcmp(com_port, "TIMEOUT") == 0)
+        {
+            SetFirmwareStatusMessage("Error: Device detection timed out. Please try again.");
+        }
+        else
+        {
+            SetFirmwareStatusMessage("Error: CH340 device not found");
+        }
+        firmware_updating = false;
+        return 1;
+    }
+
+    SetFirmwareStatusMessage("Device connected, preparing for update...");
+    firmware_update_progress = 5;
+    Sleep(500);
+
+    // 打开端口
+    if (!open_boot_port(com_port))
+    {
+        SetFirmwareStatusMessage("Error: Cannot open serial port");
+        firmware_updating = false;
+        return 1;
+    }
+
+    SetFirmwareStatusMessage("Device connected, entering update mode...");
+    firmware_update_progress = 10;
+
+    // 进入bootloader模式
+    enter_boot(hBootPort);
+
+    // 同步设备
+    if (!bl_sync(hBootPort))
+    {
+        SetFirmwareStatusMessage("Error: Device synchronization failed");
+        exit_boot(hBootPort);
+        CloseHandle(hBootPort);
+        hBootPort = INVALID_HANDLE_VALUE;
+        firmware_updating = false;
+        return 1;
+    }
+
+    firmware_update_progress = 20;
+    SetFirmwareStatusMessage("Erasing chip...");
+
+    // 擦除芯片
+    bool erased = false;
+    for (int r = 0; r < ERASE_RETRY; ++r)
+    {
+        if (bl_mass_erase(hBootPort))
+        {
+            erased = true;
+            break;
+        }
+    }
+
+    if (!erased)
+    {
+        SetFirmwareStatusMessage("Error: Chip erase failed");
+        exit_boot(hBootPort);
+        CloseHandle(hBootPort);
+        hBootPort = INVALID_HANDLE_VALUE;
+        firmware_updating = false;
+        return 1;
+    }
+
+    firmware_update_progress = 30;
+    SetFirmwareStatusMessage("Writing firmware...");
+
+    // 写入固件
+    uint32_t addr = 0x08000000;
+    size_t sent = 0;
+
+    while (sent < firmware_data_len)
+    {
+        size_t chunk = firmware_data_len - sent;
+        if (chunk > PAGE_SZ)
+            chunk = PAGE_SZ;
+
+        if (!bl_write_block(hBootPort, addr, firmware_data + sent, chunk))
+        {
+            char err_msg[64];
+            snprintf(err_msg, sizeof(err_msg), "Error: Write failed @0x%08X", addr);
+            SetFirmwareStatusMessage(err_msg);
+            exit_boot(hBootPort);
+            CloseHandle(hBootPort);
+            hBootPort = INVALID_HANDLE_VALUE;
+            firmware_updating = false;
+            return 1;
+        }
+
+        sent += chunk;
+        addr += (uint32_t)chunk;
+
+        // 更新进度
+        firmware_update_progress = 30 + (int)(sent * 60 / firmware_data_len);
+        dataChanged = true;
+        Sleep(10);
+    }
+
+    firmware_update_progress = 95;
+    SetFirmwareStatusMessage("Verifying firmware...");
+    Sleep(500);
+
+    firmware_update_progress = 100;
+    SetFirmwareStatusMessage("Update successful, restarting device");
+
+    // 退出bootloader模式，重启设备
+    exit_boot(hBootPort);
+    CloseHandle(hBootPort);
+    hBootPort = INVALID_HANDLE_VALUE;
+
+    // 清理
+    cleanup_firmware();
+    firmware_updating = false;
+    return 0;
+}
+
+// 启动固件更新过程
+void StartFirmwareUpdate(void)
+{
+    if (firmware_updating)
+    {
+        return; // 已经在更新中
+    }
+
+    // 创建更新线程
+    HANDLE updateThread = CreateThread(
+        NULL,                 // 默认安全属性
+        0,                    // 默认堆栈大小
+        UpdateFirmwareThread, // 线程函数
+        NULL,                 // 无参数
+        0,                    // 立即运行
+        NULL                  // 不需要线程ID
+    );
+
+    if (updateThread)
+    {
+        CloseHandle(updateThread);
+    }
+    else
+    {
+        SetFirmwareStatusMessage("Error: Unable to start update thread");
+    }
+}
+
+void PrepareForFirmwareUpdate()
+{
+    // 关闭所有可能已打开的端口
+    if (hBootPort != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(hBootPort);
+        hBootPort = INVALID_HANDLE_VALUE;
+    }
+
+    // 清理固件数据
+    cleanup_firmware();
+
+    // 重置状态变量
+    firmware_updating = false;
+    firmware_update_progress = 0;
+}
+
+void DisplayFirmwareUpdateWindow()
+{
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    WORD defaultAttrs = csbi.wAttributes;
+
+    // 清屏
+    for (int i = 3; i < 30; i++)
+    {
+        ClearLine(i);
+    }
+
+    // 显示固件更新界面
+    SetCursorPosition(0, 4);
+    printf("┌──────────────────────────── Curva Firmware Update ────────────────────────────┐");
+
+    SetCursorPosition(0, 5);
+    printf("│                                                                               │");
+
+    SetCursorPosition(0, 6);
+    printf("│  Detected Firmware: %-20S                                      │", firmware_version);
+
+    SetCursorPosition(0, 7);
+    printf("│  Firmware Path: %-57.57S     │", firmware_path[0] ? firmware_path : L"No firmware file found");
+
+    SetCursorPosition(0, 8);
+    printf("│                                                                               │");
+
+    SetCursorPosition(0, 9);
+    if (firmware_update_ready)
+    {
+        printf("│  Ready to update. Press Enter to start firmware update                        │");
+    }
+    else
+    {
+        printf("│");
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("  No valid firmware file found. Please put firmware files in program directory ");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        printf("│");
+    }
+
+    SetCursorPosition(0, 10);
+    printf("│                                                                               │");
+
+    // 显示更新状态和进度条
+    if (firmware_updating)
+    {
+        SetCursorPosition(0, 11);
+        printf("│  Updating: [");
+
+        // 绘制进度条 (50个字符宽度)
+        const int bar_width = 50;
+        int filled = (firmware_update_progress * bar_width) / 100;
+
+        for (int i = 0; i < bar_width; i++)
+        {
+            if (i < filled)
+            {
+                printf("#");
+            }
+            else
+            {
+                printf(" ");
+            }
+        }
+
+        printf("] %3d%%          │", firmware_update_progress);
+
+        SetCursorPosition(0, 12);
+        printf("│                                                                               │");
+
+        SetCursorPosition(0, 13);
+        if (firmware_status_message)
+        {
+            printf("│  Status: %-69s│", firmware_status_message);
+        }
+        else
+        {
+            printf("│  Status: Preparing update...                                                │");
+        }
+    }
+    else if (firmware_status_message)
+    {
+        SetCursorPosition(0, 11);
+        printf("│                                                                               │");
+
+        SetCursorPosition(0, 12);
+        printf("│  Status: ");
+
+        if (strstr(firmware_status_message, "Error") != NULL)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+            printf("%-69s", firmware_status_message);
+        }
+        else if (strstr(firmware_status_message, "successful") != NULL ||
+                 strstr(firmware_status_message, "Update success") != NULL)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            printf("%-69s", firmware_status_message);
+        }
+        else
+        {
+            printf("%-69s", firmware_status_message);
+        }
+
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        printf("│");
+
+        SetCursorPosition(0, 13);
+        printf("│                                                                               │");
+    }
+    else
+    {
+        SetCursorPosition(0, 11);
+        printf("│                                                                               │");
+
+        SetCursorPosition(0, 12);
+        printf("│                                                                               │");
+
+        SetCursorPosition(0, 13);
+        printf("│                                                                               │");
+    }
+
+    // 底部说明
+    SetCursorPosition(0, 14);
+    printf("│                                                                               │");
+
+    SetCursorPosition(0, 15);
+    printf("│  ※ DO NOT disconnect power or USB connection during update                    │");
+
+    SetCursorPosition(0, 16);
+    printf("│  ※ Device will automatically restart after update completes                   │");
+
+    SetCursorPosition(0, 17);
+    printf("│                                                                               │");
+
+    SetCursorPosition(0, 18);
+    printf("│  Press [B] to return to Main View                                             │");
+
+    SetCursorPosition(0, 19);
+    printf("└───────────────────────────────────────────────────────────────────────────────┘");
+}
