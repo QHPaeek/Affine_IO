@@ -3,8 +3,12 @@ name: Build Affine IO-Chuni
 on:
   push:
     branches: [ main, master ]
+    paths:
+      - 'chuniio/**'
   pull_request:
     branches: [ main, master ]
+    paths:
+      - 'chuniio/**'
   workflow_dispatch:
 
 jobs:

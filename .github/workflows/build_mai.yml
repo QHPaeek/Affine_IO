@@ -3,8 +3,12 @@ name: Build Affine IO-Mai
 on:
   push:
     branches: [ main, master ]
+    paths:
+      - 'mai2io/**'
   pull_request:
     branches: [ main, master ]
+    paths:
+      - 'mai2io/**'
   workflow_dispatch:
 
 jobs:
