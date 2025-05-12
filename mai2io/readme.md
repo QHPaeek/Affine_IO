@@ -5,7 +5,7 @@ Affine IO-Mai
 编译DLL文件：(注意需要使用支持64位的GCC)
 
 ```
-gcc -m64 -shared .\mai2io.c .\config.c .\serial.c .\dprintf.c -o mai2io_affine.dll
+gcc -m64 -shared .\mai2io.c .\config.c .\serial.c .\dprintf.c -o mai2io_affine.dll -lsetupapi
 ```
 
 编译测试exe程序：
