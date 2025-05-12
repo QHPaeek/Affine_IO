@@ -66,24 +66,39 @@ HRESULT mai2_io_init(void)
 HRESULT mai2_io_poll(void)
 {  
     mai2_opbtn = 0;
-    if (h_exMapFile1 == NULL) {
-        mai_io_btn_1 = NULL;
+    
+    if (h_exMapFile1 == NULL || mai_io_btn_1 == NULL) {
+        if (mai_io_btn_1 != NULL) {
+            UnmapViewOfFile(mai_io_btn_1);
+            mai_io_btn_1 = NULL;
+        }
+        if (h_exMapFile1 != NULL) {
+            CloseHandle(h_exMapFile1);
+            h_exMapFile1 = NULL;
+        }
+        
         h_exMapFile1 = OpenFileMapping(FILE_MAP_ALL_ACCESS, FALSE, SHM_NAME_1);
-    }
-    if(h_exMapFile1 != NULL){
-        if(mai_io_btn_1 == NULL){
+        if (h_exMapFile1 != NULL) {
             mai_io_btn_1 = (uint8_t*)MapViewOfFile(h_exMapFile1, FILE_MAP_ALL_ACCESS, 0, 0, ARRAY_SIZE);
         }
     }
-    if (h_exMapFile2 == NULL) {
-        mai_io_btn_2 = NULL;
+    
+    if (h_exMapFile2 == NULL || mai_io_btn_2 == NULL) {
+        if (mai_io_btn_2 != NULL) {
+            UnmapViewOfFile(mai_io_btn_2);
+            mai_io_btn_2 = NULL;
+        }
+        if (h_exMapFile2 != NULL) {
+            CloseHandle(h_exMapFile2);
+            h_exMapFile2 = NULL;
+        }
+        
         h_exMapFile2 = OpenFileMapping(FILE_MAP_ALL_ACCESS, FALSE, SHM_NAME_2);
-    }
-    if(h_exMapFile2 != NULL){
-        if(mai_io_btn_2 == NULL){
+        if (h_exMapFile2 != NULL) {
             mai_io_btn_2 = (uint8_t*)MapViewOfFile(h_exMapFile2, FILE_MAP_ALL_ACCESS, 0, 0, ARRAY_SIZE);
         }
     }
+
     if(mai_io_btn_1 != NULL){
         p1 =  mai_io_btn_1[0];
         p1 |=  ((mai_io_btn_1[1] & 0b10000) << 4);
@@ -128,6 +143,10 @@ void mai2_io_touch_set_sens(uint8_t *bytes){
 void mai2_io_touch_update(bool player1, bool player2) {
     if(!thread_flag){
         thread_flag = 1;
+        
+        mai2_io_touch_1p_stop_flag = false;
+        mai2_io_touch_2p_stop_flag = false;
+        
         if (mai2_io_cfg.debug_input_1p) {
             dprintf("Affine IO:enable 1p thread\n");
             mai2_io_touch_1p_thread = (HANDLE)_beginthreadex(NULL, 0, mai2_io_touch_1p_thread_proc, _callback, 0, NULL);

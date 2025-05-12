@@ -40,6 +40,7 @@ const char *VERSION = "v0.6";
 // 颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
 #define COLOR_GREEN (FOREGROUND_GREEN | FOREGROUND_INTENSITY)
+#define COLOR_BLUE (FOREGROUND_BLUE | FOREGROUND_INTENSITY)
 #define COLOR_DEFAULT (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE)
 
 // 设备状态枚举
@@ -113,6 +114,10 @@ uint8_t prev_player1Buttons = 0;
 uint8_t prev_player2Buttons = 0;
 uint8_t prev_opButtons = 0;
 
+uint8_t touchLatency = 0;
+uint8_t buttonLatency = 0;
+bool latencyRead = false;
+
 // 原始值数组
 // 这个现在没用
 uint8_t p1RawValue[34] = {0};
@@ -158,6 +163,10 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response);
 bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response);
 bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response);
 void RemapTouchSheet();
+
+void ReadLatencySettings(HANDLE hPort, serial_packet_t *response);
+bool WriteLatencySettings(HANDLE hPort, serial_packet_t *response, uint8_t type, uint8_t value);
+void ModifyLatency();
 
 void SaveSettings();
 void LoadSettings();
@@ -592,7 +601,17 @@ void DisplayMainWindow()
     printf(" | Baud: ");
     if (deviceStateKobato == DEVICE_OK)
     {
-        printf("%-3s", kobatoHighBaud ? "HIGH" : "LOW ");
+        if (kobatoHighBaud)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_BLUE);
+            printf("HIGH");
+        }
+        else
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            printf("LOW ");
+        }
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
     }
     else
     {
@@ -604,11 +623,17 @@ void DisplayMainWindow()
     {
         if (kobatoLedEnabled)
         {
-            printf("ON/%-3d", kobatoLedBrightness);
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            printf("ON");
+            SetConsoleTextAttribute(hConsole, defaultAttrs);
+            printf("/%-3d", kobatoLedBrightness);
         }
         else
         {
-            printf("OFF   ");
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+            printf("OFF");
+            SetConsoleTextAttribute(hConsole, defaultAttrs);
+            printf("   ");
         }
     }
     else
@@ -619,7 +644,17 @@ void DisplayMainWindow()
     printf(" | Extend: ");
     if (deviceStateKobato == DEVICE_OK)
     {
-        printf("%-3s", kobatoExtendEnabled ? "ON " : "OFF");
+        if (kobatoExtendEnabled)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            printf("ON ");
+        }
+        else
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+            printf("OFF");
+        }
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
     }
     else
     {
@@ -629,7 +664,17 @@ void DisplayMainWindow()
     printf(" | Reflect: ");
     if (deviceStateKobato == DEVICE_OK)
     {
-        printf("%-3s", kobatoReflectEnabled ? "ON " : "OFF");
+        if (kobatoReflectEnabled)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            printf("ON ");
+        }
+        else
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+            printf("OFF");
+        }
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
     }
     else
     {
@@ -1441,7 +1486,7 @@ void UpdateMultiButtonState()
         {
             buttonPressStartTime = currentTime;
         }
-        else if (currentTime - buttonPressStartTime >= 3000 && !buttonFailMode)
+        else if (currentTime - buttonPressStartTime >= 2500 && !buttonFailMode)
         {
             buttonFailMode = true;
             dataChanged = true; // 强制刷新显示
@@ -1569,11 +1614,14 @@ void HandleKeyInput()
                 }
             }
             break;
-        case 65: // F7 - Modify Latency (空实现)
+        case 65: // F7 - Modify Latency
             if (currentWindow == WINDOW_MAIN)
             {
-                // 空实现，仅更新UI状态
-                dataChanged = true;
+                if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
+                {
+                    ModifyLatency();
+                    dataChanged = true;
+                }
             }
             break;
         }
@@ -1823,7 +1871,7 @@ void ModifyThreshold()
             SetConsoleTextAttribute(hConsole, COLOR_GREEN);
             if (setAllRegion)
             {
-                printf("All %c Region Thresholds have been updated to %d/999",
+                printf("All %c Region Thresholds have been updated to %d",
                        regionType, display_threshold, threshold_value);
             }
             else
@@ -2677,7 +2725,7 @@ void SaveSettings()
     fprintf(file, "[Thresholds]\n");
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
-        uint8_t displayValue = threshold_to_display(touchThreshold[i]); // 转换为0-100显示值
+        uint16_t displayValue = threshold_to_display(touchThreshold[i]);
         fprintf(file, "%s=%u\n", blockLabels[i], displayValue);
     }
 
@@ -2695,6 +2743,11 @@ void SaveSettings()
             fprintf(file, "Channel%d=INVALID\n", i);
         }
     }
+
+    // 新增：写入延迟设置数据
+    fprintf(file, "\n[Latency]\n");
+    fprintf(file, "TouchLatency=%u\n", touchLatency * 2);   // 保存实际毫秒值
+    fprintf(file, "ButtonLatency=%u\n", buttonLatency * 2); // 保存实际毫秒值
 
     fclose(file);
 
@@ -2751,6 +2804,11 @@ void LoadSettings()
     char section[32] = "";
     bool thresholdsChanged = false;
     bool touchSheetChanged = false;
+    bool latencyChanged = false;
+
+    // 临时存储读取的延迟值
+    unsigned int loadedTouchLatency = 0;
+    unsigned int loadedButtonLatency = 0;
 
     while (fgets(line, sizeof(line), file) != NULL)
     {
@@ -2811,6 +2869,25 @@ void LoadSettings()
                 }
             }
         }
+        // 处理延迟设置部分
+        else if (strcmp(section, "Latency") == 0)
+        {
+            char key[20];
+            unsigned int value;
+            if (sscanf(line, "%[^=]=%u", key, &value) == 2)
+            {
+                if (strcmp(key, "TouchLatency") == 0 && value <= 18)
+                {
+                    loadedTouchLatency = value;
+                    latencyChanged = true;
+                }
+                else if (strcmp(key, "ButtonLatency") == 0 && value <= 18)
+                {
+                    loadedButtonLatency = value;
+                    latencyChanged = true;
+                }
+            }
+        }
     }
 
     fclose(file);
@@ -2818,6 +2895,7 @@ void LoadSettings()
     // 如果阈值数据已更改，应用到设备
     bool thresholdsSuccess = false;
     bool touchSheetSuccess = false;
+    bool latencySuccess = false;
 
     if (thresholdsChanged)
     {
@@ -2858,6 +2936,27 @@ void LoadSettings()
         }
     }
 
+    // 如果延迟设置已更改，应用到设备
+    if (latencyChanged)
+    {
+        // 将毫秒值转换回设备内部值
+        uint8_t touchLatencyValue = (uint8_t)(loadedTouchLatency / 2);
+        uint8_t buttonLatencyValue = (uint8_t)(loadedButtonLatency / 2);
+
+        if (deviceState1p == DEVICE_OK)
+        {
+            bool touchSuccess = WriteLatencySettings(hPort1, &response1, 0, touchLatencyValue);
+            bool buttonSuccess = WriteLatencySettings(hPort1, &response1, 1, buttonLatencyValue);
+            latencySuccess = touchSuccess && buttonSuccess;
+        }
+        else if (deviceState2p == DEVICE_OK)
+        {
+            bool touchSuccess = WriteLatencySettings(hPort2, &response2, 0, touchLatencyValue);
+            bool buttonSuccess = WriteLatencySettings(hPort2, &response2, 1, buttonLatencyValue);
+            latencySuccess = touchSuccess && buttonSuccess;
+        }
+    }
+
     // 显示结果信息
     int promptY = 23;
     for (int i = promptY; i < promptY + 3; i++)
@@ -2866,9 +2965,11 @@ void LoadSettings()
     }
 
     SetCursorPosition(0, promptY);
-    if (thresholdsChanged || touchSheetChanged)
+    if (thresholdsChanged || touchSheetChanged || latencyChanged)
     {
-        if ((thresholdsChanged && thresholdsSuccess) || (touchSheetChanged && touchSheetSuccess))
+        if ((thresholdsChanged && thresholdsSuccess) ||
+            (touchSheetChanged && touchSheetSuccess) ||
+            (latencyChanged && latencySuccess))
         {
             SetConsoleTextAttribute(hConsole, COLOR_GREEN);
             printf("Settings loaded from curva.ini successfully!");
@@ -2901,6 +3002,258 @@ void LoadSettings()
     {
         ClearLine(i);
     }
+}
+
+void ReadLatencySettings(HANDLE hPort, serial_packet_t *response)
+{
+    if (hPort == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    // 读取触摸延迟 - 发送命令: 0xff,0x12,0x01,0x00,0x12
+    package_init(response);
+    response->syn = 0xff;
+    response->cmd = SERIAL_CMD_READ_DELAY_SETTING; // 0x12
+    response->size = 0x01;                         // 只有一个字节的payload
+    response->data[3] = 0x00;                      // 触摸类型(0)
+    serial_writeresp(hPort, response);
+
+    // 等待响应 - 期望: 0xff,0x12,0x02,0x00,0x00,0x13
+    const int READ_ITERATIONS = 100;
+    DWORD startTime = GetTickCount();
+    uint8_t cmd;
+
+    while ((GetTickCount() - startTime) < 500) // 500ms超时，与ReadThreshold一致
+    {
+        for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
+        {
+            package_init(response);
+            cmd = serial_read_cmd(hPort, response);
+            if (cmd == SERIAL_CMD_READ_DELAY_SETTING && response->size >= 2)
+            {
+                if (response->data[3] == 0x00) // 确认是触摸延迟
+                {
+                    touchLatency = response->data[4]; // 直接获取延迟值
+                    goto read_button_latency;         // 直接跳到读取按键延迟
+                }
+            }
+        }
+        Sleep(1); // 与threshold函数一致，每轮内部循环后休眠1ms
+    }
+
+read_button_latency:
+    // 读取按键延迟 - 发送命令: 0xff,0x12,0x01,0x01,0x13
+    package_init(response);
+    response->syn = 0xff;
+    response->cmd = SERIAL_CMD_READ_DELAY_SETTING; // 0x12
+    response->size = 0x01;                         // 只有一个字节的payload
+    response->data[3] = 0x01;                      // 按键类型(1)
+    serial_writeresp(hPort, response);
+
+    // 等待响应 - 期望: 0xff,0x12,0x02,0x01,0xXX,0xYY
+    startTime = GetTickCount();
+
+    while ((GetTickCount() - startTime) < 500) // 500ms超时，与ReadThreshold一致
+    {
+        for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
+        {
+            package_init(response);
+            cmd = serial_read_cmd(hPort, response);
+            if (cmd == SERIAL_CMD_READ_DELAY_SETTING && response->size >= 2)
+            {
+                if (response->data[3] == 0x01) // 确认是按键延迟
+                {
+                    buttonLatency = response->data[4]; // 直接获取延迟值
+                    latencyRead = true;
+                    return;
+                }
+            }
+        }
+        Sleep(1); // 与threshold函数一致，每轮内部循环后休眠1ms
+    }
+}
+
+// 写入延迟设置
+bool WriteLatencySettings(HANDLE hPort, serial_packet_t *response, uint8_t type, uint8_t value)
+{
+    if (hPort == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    // 发送写入延迟命令
+    package_init(response);
+    response->syn = 0xff;
+    response->cmd = SERIAL_CMD_WRITE_DELAY_SETTING; // 0x13
+    response->size = 0x02;                          // 两个字节的payload
+    response->data[3] = type;                       // 0-触摸, 1-按键
+    response->data[4] = value;                      // 延迟值 (0-9)
+    serial_writeresp(hPort, response);
+
+    const int READ_ITERATIONS = 100;
+    DWORD startTime = GetTickCount();
+    uint8_t cmd;
+
+    while ((GetTickCount() - startTime) < 1000)
+    {
+        for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
+        {
+            package_init(response);
+            cmd = serial_read_cmd(hPort, response);
+            if (cmd == SERIAL_CMD_WRITE_DELAY_SETTING)
+            {
+                // 验证响应是否为OK
+                if (response->size >= 1 && response->data[3] == type)
+                {
+                    // 更新本地存储的延迟值
+                    if (type == 0)
+                        touchLatency = value;
+                    else
+                        buttonLatency = value;
+                    return true;
+                }
+                return false;
+            }
+        }
+        Sleep(1); // 与threshold函数一致
+    }
+
+    return false; // 超时
+}
+
+// 修改延迟设置函数
+void ModifyLatency()
+{
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    WORD defaultAttrs = csbi.wAttributes;
+
+    // 如果尚未读取延迟设置，先读取
+    if (!latencyRead)
+    {
+        if (deviceState1p == DEVICE_OK)
+        {
+            ReadLatencySettings(hPort1, &response1);
+        }
+        else if (deviceState2p == DEVICE_OK)
+        {
+            ReadLatencySettings(hPort2, &response2);
+        }
+        else
+        {
+            // 设备未连接，无法读取
+            return;
+        }
+    }
+
+    // 在底部显示提示信息
+    int promptY = 23;
+
+    // 清除提示区域
+    for (int i = promptY; i < promptY + 5; i++)
+    {
+        ClearLine(i);
+    }
+
+    // 显示提示信息 - 每单位对应2ms，最大值为9（对应18ms）
+    SetCursorPosition(0, promptY);
+    printf("┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓");
+    SetCursorPosition(0, promptY + 1);
+    printf("┃                        Latency Settings (in milliseconds, MAX 18)                           ┃");
+    SetCursorPosition(0, promptY + 2);
+    printf("┃  Current settings:   Touch latency: %-2d ms    Button latency: %-2d ms                          ┃",
+           touchLatency * 2, buttonLatency * 2);
+    SetCursorPosition(0, promptY + 3);
+    printf("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛");
+    SetCursorPosition(0, promptY + 4);
+    printf("Enter type (T:Touch, B:Button) and value (e.g., T/10 for 10ms touch latency): ");
+
+    // 显示光标
+    CONSOLE_CURSOR_INFO cursorInfo;
+    GetConsoleCursorInfo(hConsole, &cursorInfo);
+    cursorInfo.bVisible = TRUE;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+
+    // 获取用户输入
+    char input[20];
+    fgets(input, sizeof(input), stdin);
+
+    // 移除可能的换行符
+    size_t len = strlen(input);
+    if (len > 0 && input[len - 1] == '\n')
+        input[len - 1] = '\0';
+
+    // 解析输入
+    char type;
+    int value;
+    bool success = false;
+
+    if (sscanf(input, "%c/%d", &type, &value) == 2)
+    {
+        type = toupper(type);
+        // 验证输入的范围 - 新的范围为0-18ms (0-9个包)
+        if ((type == 'T' || type == 'B') && value >= 0 && value <= 18)
+        {
+            uint8_t typeCode = (type == 'T') ? 0 : 1;
+            // 将用户输入的毫秒值除以2，转换为设备内部值（包数量，范围0-9）
+            uint8_t deviceValue = (uint8_t)(value / 2);
+
+            // 写入延迟设置
+            if (deviceState1p == DEVICE_OK)
+            {
+                success = WriteLatencySettings(hPort1, &response1, typeCode, deviceValue);
+            }
+            else if (deviceState2p == DEVICE_OK)
+            {
+                success = WriteLatencySettings(hPort2, &response2, typeCode, deviceValue);
+            }
+        }
+    }
+
+    // 清除用户输入行
+    ClearLine(promptY + 4);
+    SetCursorPosition(0, promptY + 4);
+
+    // 显示结果
+    if (success)
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+        printf("Latency setting updated successfully! Touch: %d ms, Button: %d ms",
+               touchLatency * 2, buttonLatency * 2);
+    }
+    else
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        if ((type == 'T' || type == 'B') && (value < 0 || value > 18))
+        {
+            printf("Failed to update latency setting: Please enter a value between 0 and 18 ms");
+        }
+        else if (type != 'T' && type != 'B')
+        {
+            printf("Failed to update latency setting: Invalid type. Please use T (Touch) or B (Button).");
+        }
+        else
+        {
+            printf("Failed to update latency setting: Device did not confirm the change.");
+        }
+    }
+    SetConsoleTextAttribute(hConsole, defaultAttrs);
+
+    // 等待用户查看
+    Sleep(2000);
+
+    // 恢复光标和清理屏幕
+    cursorInfo.bVisible = FALSE;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+
+    for (int i = promptY; i < promptY + 5; i++)
+    {
+        ClearLine(i);
+    }
+
+    // 强制更新显示
+    dataChanged = true;
 }
 
 /*
