@@ -1,0 +1,63 @@
+name: Build Affine IO-Chuni
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'chuniio/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'chuniio/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+        working-directory: chuniio
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: true
+          install: >-
+            mingw-w64-i686-gcc
+            mingw-w64-i686-make
+
+      - name: Build Chuni DLL
+        run: |
+          gcc -shared -o chuniio_affine.dll chuniio.c config.c serialslider.c -lsetupapi
+
+      - name: Build Chuni Test Program
+        run: |
+          gcc test.c serialslider.c -o chuni_test.exe -lsetupapi
+
+      - name: Upload DLL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chuniio_affine-dll
+          path: chuniio/chuniio_affine.dll
+
+      - name: Upload Test Program Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chuni_test-exe
+          path: chuniio/chuni_test.exe
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            chuniio/chuniio_affine.dll
+            chuniio/chuni_test.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

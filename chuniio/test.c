@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include "serialslider.h"
 
-extern char comPort[6];
+extern char comPort[13];
 char *vid = "VID_AFF1";
 char *pid = "PID_52A4";
 
@@ -11,6 +11,8 @@ char *pid = "PID_52A4";
 #define THRESHOLD 128
 
 uint8_t airStatus = 0; // Air status variable
+
+const char *VERSION = "v0.2";
 
 typedef enum
 {
@@ -24,18 +26,18 @@ void DisplayHeader(HANDLE hConsole, DeviceState state)
     COORD pos = {0, 0};
     SetConsoleCursorPosition(hConsole, pos);
 
-    // Title
-    printf("Linnea Test Tools v0.1\n");
+    // 修改程序标题
+    printf("Linnea Test Tools %s\n", VERSION);
 
     // State
     printf("Device State: ");
     switch (state)
     {
     case DEVICE_WAIT:
-        printf("Wait");
+        printf("WAIT");
         break;
     case DEVICE_FAIL:
-        printf("Fail");
+        printf("FAIL");
         break;
     case DEVICE_OK:
         printf("OK  ");
@@ -59,116 +61,110 @@ void DisplaySectionTitle(HANDLE hConsole, const char *title, int row, int column
 
 void DisplayGroundSlider(HANDLE hConsole, int data[HEIGHT][WIDTH])
 {
-    CHAR_INFO buffer[HEIGHT + 2][WIDTH * 6 + 1];
-    COORD bufferSize = {WIDTH * 6 + 1, HEIGHT + 2};
-    COORD bufferCoord = {0, 0};
-    SMALL_RECT writeRegion = {0, 4, WIDTH * 6, HEIGHT + 5};
-
-    for (int y = 0; y < HEIGHT + 2; y++)
+    COORD startPos = {0, 3};
+    
+    SetConsoleCursorPosition(hConsole, startPos);
+    printf("┌─────────────────────────────────────────── Touch Values ──────────────────────────────────────┐");
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 1});
+    printf("│");
+    for (int x = 0; x < WIDTH; x++)
     {
-        for (int x = 0; x < WIDTH * 6 + 1; x++)
-        {
-            buffer[y][x].Char.UnicodeChar = ' ';
-            buffer[y][x].Attributes = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
-        }
+        printf("     │");
     }
-
-    for (int x = 0; x < WIDTH * 6 + 1; x++)
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 2});
+    printf("│");
+    for (int x = 0; x < WIDTH; x++)
     {
-        buffer[0][x].Char.UnicodeChar = L'-';
-        buffer[HEIGHT + 1][x].Char.UnicodeChar = L'-';
+        if (data[0][x] > THRESHOLD)
+            SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
+        
+        printf(" %3d ", data[0][x]);  
+        
+        SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+        printf("│");
     }
-    for (int y = 0; y < HEIGHT + 2; y++)
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 3});
+    printf("│");
+    for (int x = 0; x < WIDTH; x++)
     {
-        buffer[y][0].Char.UnicodeChar = L'|';
-        buffer[y][WIDTH * 6].Char.UnicodeChar = L'|';
+        printf("     │");
     }
-
-    for (int y = 0; y < HEIGHT; y++)
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 4});
+    printf("├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┤");
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 5});
+    printf("│");
+    for (int x = 0; x < WIDTH; x++)
     {
-        for (int x = 0; x < WIDTH; x++)
-        {
-            int indexX = x * 6 + 1;
-            int indexY = y + 1;
-            char cell[6];
-            snprintf(cell, sizeof(cell), "%3d |", data[y][x]);
-            for (int i = 0; i < 5; i++)
-            {
-                buffer[indexY][indexX + i].Char.UnicodeChar = cell[i];
-                if (data[y][x] > THRESHOLD)
-                {
-                    buffer[indexY][indexX + i].Attributes = FOREGROUND_RED | FOREGROUND_INTENSITY;
-                }
-                else
-                {
-                    buffer[indexY][indexX + i].Attributes = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
-                }
-            }
-        }
+        printf("     │");
     }
-
-    WriteConsoleOutput(hConsole, (CHAR_INFO *)buffer, bufferSize, bufferCoord, &writeRegion);
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 6});
+    printf("│");
+    for (int x = 0; x < WIDTH; x++)
+    {
+        if (data[1][x] > THRESHOLD)
+            SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
+        
+        printf(" %3d ", data[1][x]);  
+        
+        SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+        printf("│");
+    }
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 7});
+    printf("│");
+    for (int x = 0; x < WIDTH; x++)
+    {
+        printf("     │");
+    }
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 8});
+    printf("└───────────────────────────────────────────────────────────────────────────────────────────────┘");
 }
 
 void DisplayAirStatus(HANDLE hConsole, uint8_t status)
 {
-    CHAR_INFO buffer[8][20]; // 6 for sensors + 2 for border
-    COORD bufferSize = {20, 8};
-    COORD bufferCoord = {0, 0};
-
-    SMALL_RECT writeRegion = {WIDTH * 6 + 2, 4, WIDTH * 6 + 21, 11};
-
-    // Initialize display area
-    for (int y = 0; y < 8; y++)
-    {
-        for (int x = 0; x < 20; x++)
-        {
-            buffer[y][x].Char.UnicodeChar = ' ';
-            buffer[y][x].Attributes = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
-        }
-    }
-
-    // Draw borders
-    for (int x = 0; x < 20; x++)
-    {
-        buffer[0][x].Char.UnicodeChar = L'-';
-        buffer[7][x].Char.UnicodeChar = L'-';
-    }
-    for (int y = 0; y < 8; y++)
-    {
-        buffer[y][0].Char.UnicodeChar = L'|';
-        buffer[y][19].Char.UnicodeChar = L'|';
-    }
-
-    // Display every air sensor status
+    COORD startPos = {WIDTH * 5 + 17, 3}; 
+    
+    SetConsoleCursorPosition(hConsole, startPos);
+    printf("  ┌──── IR States ────┐");
+    
     for (int i = 0; i < 6; i++)
     {
-        int sensorNum = 6 - i; // 6,5,4,3,2,1
-        int y = i + 1;         // row
-
-        // Label
-        char label[5];
-        snprintf(label, sizeof(label), "IR_%d", sensorNum);
-        for (int j = 0; j < strlen(label); j++)
-        {
-            buffer[y][j + 2].Char.UnicodeChar = label[j];
-        }
-
-        // Status
+        int sensorNum = 6 - i;
+        SetConsoleCursorPosition(hConsole, (COORD){startPos.X + 2, startPos.Y + i + 1});
+        
+        printf("│   IR_%d     ", sensorNum);
+        
         bool isActive = (status & (1 << (sensorNum - 1))) != 0;
-        const char *stateText = isActive ? "ON " : "OFF";
-        for (int j = 0; j < 3; j++)
-        {
-            buffer[y][j + 12].Char.UnicodeChar = stateText[j];
-            buffer[y][j + 12].Attributes = isActive ? (FOREGROUND_RED | FOREGROUND_INTENSITY) : (FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+        if (isActive) {
+            SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
+            printf("ON ");
+        } else {
+            printf("OFF");
         }
+        
+        SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
+        printf("    │");
     }
-
-    WriteConsoleOutput(hConsole, (CHAR_INFO *)buffer, bufferSize, bufferCoord, &writeRegion);
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X + 2, startPos.Y + 7});
+    printf("│ WHITE LED WHEN ON │");
+    
+    SetConsoleCursorPosition(hConsole, (COORD){startPos.X + 2, startPos.Y + 8});
+    printf("└───────────────────┘");
 }
 
 int main()
 {
+    // Set console to UTF-8 mode
+    SetConsoleOutputCP(65001);
+
     slider_packet_t reponse;
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     DeviceState deviceState = DEVICE_WAIT;
@@ -180,20 +176,42 @@ int main()
         return 1;
     }
 
+    COORD bufferSize = {100, 30};
+    SMALL_RECT windowSize = {0, 0, 99, 29};
+    SetConsoleScreenBufferSize(hConsole, bufferSize);
+    SetConsoleWindowInfo(hConsole, TRUE, &windowSize);
+    
+    CONSOLE_CURSOR_INFO cursorInfo;
+    GetConsoleCursorInfo(hConsole, &cursorInfo);
+    cursorInfo.bVisible = FALSE;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+
     // Initialize display
     DisplayHeader(hConsole, deviceState);
 
     int consoleWidth = WIDTH * 6 + 22;
-    DisplaySectionTitle(hConsole, "Touch Values", 3, 0, consoleWidth - 20);
-
-    DisplaySectionTitle(hConsole, "IR States", 3, WIDTH * 6 + 2, 20);
 
     memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
 
-    if (*comPort == 0x48)
+    if (comPort[0] == 0)
     {
         char *default_comPort = "COM1";
         memcpy(comPort, default_comPort, 5);
+    }
+    else if (comPort[4] == 0)
+    {
+        int port_num = (comPort[3] - '0');
+        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+    }
+    else if (comPort[5] == 0)
+    {
+        int port_num = (comPort[3] - '0') * 10 + (comPort[4] - '0');
+        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+    }
+    else
+    {
+        int port_num = (comPort[3] - '0') * 100 + (comPort[4] - '0') * 10 + (comPort[5] - '0');
+        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
     }
 
     if (!open_port())
@@ -213,12 +231,19 @@ int main()
     int data[HEIGHT][WIDTH] = {
         {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    
     uint8_t rgb[93] = {
         255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,
         255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,
     };
+    
+    // 初始绘制UI
+    DisplayGroundSlider(hConsole, data);
+    DisplayAirStatus(hConsole, airStatus);
+    
     slider_send_leds(rgb);
     package_init(&reponse);
+    
     while (1)
     {
         for (uint8_t i = 0; i < 100; i++)
@@ -239,6 +264,7 @@ int main()
                 DisplayGroundSlider(hConsole, data);
                 DisplayAirStatus(hConsole, airStatus); 
                 break;
+                
             case SLIDER_CMD_AUTO_AIR:
                 airStatus = reponse._air_status; 
                 package_init(&reponse);
@@ -250,13 +276,11 @@ int main()
                 airStatus = 0; 
                 deviceState = DEVICE_FAIL;
                 DisplayHeader(hConsole, deviceState);
-                DisplaySectionTitle(hConsole, "Touch Values", 3, 0, consoleWidth - 20);
-                DisplaySectionTitle(hConsole, "IR States", 3, WIDTH * 6 + 2, 20);
                 DisplayGroundSlider(hConsole, data);
                 DisplayAirStatus(hConsole, airStatus); 
 
                 close_port();
-                COORD statusPos = {0, HEIGHT + 7};
+                COORD statusPos = {0, HEIGHT + 12};
                 SetConsoleCursorPosition(hConsole, statusPos);
 
                 // Only show the connection failed message if it's not the first connection
@@ -272,19 +296,33 @@ int main()
                 {
                     close_port();
                     memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
-                    if (*comPort == 0x48)
+                    
+                    if (comPort[0] == 0)
                     {
                         char *default_comPort = "COM1";
                         memcpy(comPort, default_comPort, 5);
                     }
+                    else if (comPort[4] == 0)
+                    {
+                        int port_num = (comPort[3] - '0');
+                        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+                    }
+                    else if (comPort[5] == 0)
+                    {
+                        int port_num = (comPort[3] - '0') * 10 + (comPort[4] - '0');
+                        snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
+                    }
+                    else
+                    {
+                        int port_num = (comPort[3] - '0') * 100 + (comPort[4] - '0') * 10 + (comPort[5] - '0');
+                        snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
+                    }
+                    
                     Sleep(1);
                 }
 
                 deviceState = DEVICE_OK;
                 DisplayHeader(hConsole, deviceState);
-
-                DisplaySectionTitle(hConsole, "Touch Values", 3, 0, consoleWidth - 20);
-                DisplaySectionTitle(hConsole, "IR States", 3, WIDTH * 6 + 2, 20);
 
                 if (!isFirstConnection)
                 {
@@ -299,6 +337,7 @@ int main()
                 slider_start_air_scan();
                 slider_start_scan();
                 break;
+                
             default:
                 break;
             }

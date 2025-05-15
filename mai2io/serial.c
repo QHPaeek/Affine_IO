@@ -125,7 +125,10 @@ BOOL open_port(HANDLE *hPortx ,char* comPortx) {
     return TRUE;
 }
 void close_port(HANDLE *hPortx){
-	CloseHandle(*hPortx);
+    if (*hPortx != INVALID_HANDLE_VALUE) {
+        CloseHandle(*hPortx);
+        *hPortx = INVALID_HANDLE_VALUE; // 重置句柄为无效值
+    }
 }
 
 void package_init(serial_packet_t *rsponse){
@@ -155,17 +158,25 @@ BOOL send_data(HANDLE hPortx,int length,uint8_t *send_buffer)
     return TRUE;
 }
 
-void serial_writeresp(HANDLE hPortx,serial_packet_t *rsponse) {
-	uint8_t checksum = 0 - rsponse->syn - rsponse->cmd - rsponse->size; 
-	uint8_t length = rsponse->size + 4;
-	for (uint8_t i = 0;i<rsponse->size;i++){
-		checksum -= rsponse->data[i+3];
-		if((rsponse->data[i+3] == 0xff) && (rsponse->data[i+3] == 0xfd)){
-			rsponse->data[i+3] = 0xfe;
-		}
-	}
-	rsponse->data[rsponse->size+3] = checksum;
-	send_data(hPortx,length,rsponse->data);
+void serial_writeresp(HANDLE hPortx, serial_packet_t *rsponse) {
+	// 计算校验和
+    uint8_t checksum = rsponse->syn + rsponse->cmd + rsponse->size;
+    uint8_t length = rsponse->size + 4;
+    
+    rsponse->data[0] = rsponse->syn;
+    rsponse->data[1] = rsponse->cmd;
+    rsponse->data[2] = rsponse->size;
+    
+    for (uint8_t i = 0; i < rsponse->size; i++) {
+        checksum += rsponse->data[i+3];
+//        if ((rsponse->data[i+3] == 0xff) || (rsponse->data[i+3] == 0xfd)) {
+//            rsponse->data[i+3] = 0xfe;
+//        }
+    }
+    
+    // 校验和自动截断为1字节（uint8_t类型）
+    rsponse->data[rsponse->size+3] = checksum;
+    send_data(hPortx, length, rsponse->data);
 }
 
 BOOL serial_read1(HANDLE hPortx,uint8_t *result){
