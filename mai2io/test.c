@@ -1274,7 +1274,9 @@ void ReconnectDevices()
         // 处理COM端口格式（使用相同的简化逻辑）
         if (comPort2[0] == 0)
         {
-            strcpy(comPort2, "\\\\.\\COM12");
+            // 不连接到默认端口
+            deviceState2p = DEVICE_WAIT;
+            return;
         }
         else
         {
