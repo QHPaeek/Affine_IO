@@ -211,7 +211,7 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
                 memset(comPort,0,13);
                 while(hPort1 == NULL || hPort1 == INVALID_HANDLE_VALUE){
                     CloseHandle(hPort1);
-                    strncpy(comPort,GetSerialPortByVidPid(Vid,Pid_1p),6);
+                    strncpy(comPort,GetSerialPortByVidPid(Vid,Pid_2p),6);
                     if(comPort[0] == 0){
                         int port_num = 11;
                         snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
@@ -289,7 +289,7 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
 		    case SERIAL_CMD_AUTO_SCAN:
 			    memcpy(state, response2.touch, 7);
                 if (mai_io_btn != NULL) {
-                    mai_io_btn[0] = response2.key_status[0] & response2.key_status[1];
+                    mai_io_btn[0] = response2.key_status[0] | response2.key_status[1];
                     mai_io_btn[1] = response2.io_status;
                 }
                 package_init(&response2);
