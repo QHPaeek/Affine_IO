@@ -1119,13 +1119,17 @@ void DisplayTouchPanelWindow()
         {
             SetConsoleTextAttribute(hConsole, COLOR_GREEN);
         }
-        else if (strstr(autoRemapStatus, "ERROR") != NULL ||
+        else if (strstr(autoRemapStatus, "FAILED") != NULL ||
                  strstr(autoRemapStatus, "CANCELED") != NULL)
         {
             SetConsoleTextAttribute(hConsole, COLOR_RED);
         }
+        else
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+        }
         printf("%-22s", autoRemapStatus);
-        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
     }
     else
     {
@@ -3563,6 +3567,29 @@ void ModifyLatency()
 
 void StartAutoRemap() 
 {
+    // 首先显示正在读取当前映射的状态
+    strcpy(autoRemapStatus, "READING CURRENT MAP");
+    dataChanged = true;
+    
+    // 读取当前映射表
+    bool mappingRead = false;
+
+    if (deviceState1p == DEVICE_OK)
+    {
+        mappingRead = ReadTouchSheet(hPort1, &response1);
+    }
+    else if (deviceState2p == DEVICE_OK)
+    {
+        mappingRead = ReadTouchSheet(hPort2, &response2);
+    }
+
+    if (!mappingRead)
+    {
+        strcpy(autoRemapStatus, "READ MAP FAILED");
+        return;
+    }
+    
+    // 映射读取成功，开始自动映射
     autoRemapActive = true;
     autoRemapStage = 0;
     autoRemapCollected = 0;
@@ -3572,8 +3599,8 @@ void StartAutoRemap()
     memset(autoRemapCompletedRegions, false, TOUCH_REGIONS); // 清空已完成标记
     memset(prevTouchMatrix, 0, sizeof(prevTouchMatrix)); // 清空上一帧触摸状态
     
-    // 设置初始状态
-    strcpy(autoRemapStatus, "COLLECTING ALL REGIONS");
+    // 设置收集状态
+    strcpy(autoRemapStatus, "COLLECTING");
     dataChanged = true;
 }
 
@@ -3694,24 +3721,8 @@ void ProcessAutoRemapTouch()
 
 void CompleteAutoRemap()
 {
-    // 读取当前映射表
-    bool mappingRead = false;
-
-    if (deviceState1p == DEVICE_OK)
-    {
-        mappingRead = ReadTouchSheet(hPort1, &response1);
-    }
-    else if (deviceState2p == DEVICE_OK)
-    {
-        mappingRead = ReadTouchSheet(hPort2, &response2);
-    }
-
-    if (!mappingRead)
-    {
-        strcpy(autoRemapStatus, "Failed to read mapping");
-        return;
-    }
-
+    // 当前映射已在StartAutoRemap中读取，直接进行映射处理
+    
     // 创建标准区块索引数组
     const uint8_t standardOrder[TOUCH_REGIONS] = {
         // D1,A1,D2,A2,D3,A3,D4,A4,D5,A5,D6,A6,D7,A7,D8,A8,
@@ -3766,7 +3777,7 @@ void CompleteAutoRemap()
     // 更新状态
     if (success1p || success2p)
     {
-        strcpy(autoRemapStatus, "Mapping updated");
+        strcpy(autoRemapStatus, "SUCCESS");
 
         // 发送心跳以确保连接保持
         if (success1p && deviceState1p == DEVICE_OK)
@@ -3780,7 +3791,7 @@ void CompleteAutoRemap()
     }
     else
     {
-        strcpy(autoRemapStatus, "Failed to write mapping");
+        strcpy(autoRemapStatus, "WRITE FAILED");
     }
 
     dataChanged = true;
