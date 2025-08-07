@@ -21,7 +21,7 @@
 
 /* ---------- 常量定义 ---------- */
 // 版本号
-const char *VERSION = "v0.7";
+const char *VERSION = "v0.7a";
 
 // 触摸和按键相关常量
 #define TOUCH_REGIONS 34        // 触摸区域总数
@@ -3201,11 +3201,26 @@ void LoadSettings()
 
     fclose(file);
 
-    // 如果阈值数据已更改，应用到设备
+    // 先应用触摸映射，再应用阈值
     bool thresholdsSuccess = false;
     bool touchSheetSuccess = false;
     bool latencySuccess = false;
 
+    // 如果触摸映射已更改，先应用到设备
+    if (touchSheetChanged)
+    {
+        if (deviceState1p == DEVICE_OK)
+        {
+            touchSheetSuccess = WriteTouchSheet(hPort1, &response1);
+        }
+
+        if (deviceState2p == DEVICE_OK && !touchSheetSuccess)
+        {
+            touchSheetSuccess = WriteTouchSheet(hPort2, &response2);
+        }
+    }
+
+    // 如果阈值数据已更改，再应用到设备
     if (thresholdsChanged)
     {
         if (deviceState1p == DEVICE_OK)
@@ -3228,20 +3243,6 @@ void LoadSettings()
                 Sleep(10);
             }
             thresholdsSuccess = true;
-        }
-    }
-
-    // 如果触摸映射已更改，应用到设备
-    if (touchSheetChanged)
-    {
-        if (deviceState1p == DEVICE_OK)
-        {
-            touchSheetSuccess = WriteTouchSheet(hPort1, &response1);
-        }
-
-        if (deviceState2p == DEVICE_OK && !touchSheetSuccess)
-        {
-            touchSheetSuccess = WriteTouchSheet(hPort2, &response2);
         }
     }
 
