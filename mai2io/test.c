@@ -2265,7 +2265,7 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response)
         touchThreshold[i] = ReadThreshold(hPort, response, i);
         
         // 适当增加延迟，给设备更多反应时间
-        Sleep(50);
+        Sleep(20);
         
         // 可选：显示读取进度（调试用）
         #ifdef DEBUG
@@ -2283,7 +2283,7 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
 
     // 清空串口缓冲区，避免残留数据干扰
     PurgeComm(hPort, PURGE_RXCLEAR | PURGE_TXCLEAR);
-    Sleep(50); // 给设备一点反应时间
+    Sleep(10); // 给设备一点反应时间
 
     // 发送读取触摸映射表命令
     package_init(response);
