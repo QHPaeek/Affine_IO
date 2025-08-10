@@ -21,12 +21,12 @@
 
 /* ---------- 常量定义 ---------- */
 // 版本号
-const char *VERSION = "v0.7a";
+const char *VERSION = "v0.8";
 
 // 触摸和按键相关常量
 #define TOUCH_REGIONS 34        // 触摸区域总数
 #define BUTTONS_COUNT 8         // 按钮总数
-#define THRESHOLD_DEFAULT 32767 // 默认阈值
+#define THRESHOLD_DEFAULT 16384 // 默认阈值
 #define THRESHOLD_READ_FAILED 65535 // 标记读取失败的特殊值
 
 // 连接和重连常量
@@ -97,6 +97,14 @@ bool isFirstConnection1p = TRUE;
 bool isFirstConnection2p = TRUE;
 bool usePlayer2 = FALSE; // 控制是否切换到2P模式
 
+// 阈值读取状态变量
+bool thresholdReading1p = FALSE;
+bool thresholdReading2p = FALSE;
+int thresholdProgress1p = 0;  // 0-34，当前读取进度
+int thresholdProgress2p = 0;  // 0-34，当前读取进度
+bool thresholdComplete1p = FALSE;
+bool thresholdComplete2p = FALSE;
+
 // 设备连接配置
 char *Vid = "VID_AFF1";
 char *Pid_1p = "PID_52A5";
@@ -158,6 +166,10 @@ uint8_t fetLEDs[3] = {0};
 // 缓冲区状态
 bool dataChanged = true;
 
+// 心跳控制变量
+bool heartbeatEnabled = true;         // 心跳是否启用
+DWORD heartbeatPauseStartTime = 0;    // 心跳暂停开始时间
+
 // 固件更新相关变量
 bool firmware_update_ready = false;          // 是否找到可更新的固件
 bool firmware_updating = false;              // 是否正在更新
@@ -193,6 +205,7 @@ void SetCursorPosition(int x, int y);
 void ClearLine(int line);
 void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8]);
 void DisplayThresholds();
+void DisplayInputTest();
 void DisplayButtons();
 void UpdateFirmwareProgressOnly();
 
@@ -208,6 +221,11 @@ void UpdateTouchData();
 void UpdateMultiButtonState();
 bool IsDataChanged();
 
+// 心跳控制函数
+void PauseHeartbeat();
+void ResumeHeartbeat();
+void CheckAndStartThresholdReading(); // 检查并开始阈值读取
+
 // 阈值和触摸配置相关函数
 void ModifyThreshold();
 void InitThresholds();
@@ -219,6 +237,7 @@ void RemapTouchSheet();
 void ReadLatencySettings(HANDLE hPort, serial_packet_t *response);
 bool WriteLatencySettings(HANDLE hPort, serial_packet_t *response, uint8_t type, uint8_t value);
 void ModifyLatency();
+void CheckAndStartThresholdReading(); // 检查并开始阈值读取
 
 // 配置文件操作
 void SaveSettings();
@@ -245,7 +264,8 @@ void SetFirmwareStatusMessage(const char *msg);
 // 阈值转换辅助函数
 static inline uint16_t threshold_to_display(uint16_t threshold)
 {
-    return (uint16_t)((threshold * 999) / 32767);
+    // 使用四舍五入避免精度损失
+    return (uint16_t)((threshold * 999 + 8192) / 16384);
 }
 
 // 格式化阈值显示，读取失败时显示UNK
@@ -263,7 +283,8 @@ static inline void format_threshold_display(char *buffer, int index)
 
 static inline uint16_t display_to_threshold(uint16_t display)
 {
-    return (uint16_t)((uint32_t)display * 32767 / 999);
+    // 使用四舍五入避免精度损失
+    return (uint16_t)((uint32_t)display * 16384 + 499) / 999;
 }
 
 int main()
@@ -326,6 +347,9 @@ int main()
             HandleKeyInput();
             dataChanged = true;
         }
+
+        // 检查是否需要开始阈值读取
+        CheckAndStartThresholdReading();
 
         // 更新设备状态和数据
         UpdateDeviceState();
@@ -524,6 +548,9 @@ void DisplayMainWindow()
 
     // 显示阈值数据
     DisplayThresholds();
+    
+    // 显示Input Test（总是显示）
+    DisplayInputTest();
 
     SetCursorPosition(0, 13);
     printf("└──────────────────────────────────────────────────────────────────────────┘   └──────────────────────┘");
@@ -761,6 +788,87 @@ void DisplayThresholds()
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
 
+    // 检查设备状态
+    bool device1pConnected = (deviceState1p == DEVICE_OK);
+    bool device2pConnected = (deviceState2p == DEVICE_OK && usePlayer2);
+    bool currentDeviceConnected = usePlayer2 ? device2pConnected : device1pConnected;
+    
+    // 如果设备未连接，显示 "Device Not Connected"
+    if (!currentDeviceConnected)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            SetCursorPosition(0, 5 + i);
+            if (i == 3) // 在中间显示消息
+            {
+                printf("│                           DEVICE NOT CONNECTED                           │");
+            }
+            else if (i == 4) // 在下一行也显示消息
+            {
+                printf("│                           DEVICE NOT CONNECTED                           │");
+            }
+            else
+            {
+                printf("│                                                                          │");
+            }
+        }
+        return;
+    }
+    
+    // 如果正在读取阈值，显示进度
+    bool isReading = usePlayer2 ? thresholdReading2p : thresholdReading1p;
+    bool isComplete = usePlayer2 ? thresholdComplete2p : thresholdComplete1p;
+    int progress = usePlayer2 ? thresholdProgress2p : thresholdProgress1p;
+    
+    // 如果设备已连接但阈值还没有读取完成，显示等待或进度
+    if (currentDeviceConnected && (!isComplete || isReading))
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            SetCursorPosition(0, 5 + i);
+            if (isReading)
+            {
+                // 正在读取，显示进度
+                if (i == 3)
+                {
+                    printf("│                        Threshold Reading (%d/34)                         │", progress);
+                }
+                else if (i == 4)
+                {
+                    int barWidth = 60;
+                    int filled = (progress * barWidth) / 34;
+                    printf("│       [");
+                    for (int j = 0; j < barWidth; j++)
+                    {
+                        if (j < filled)
+                            printf("=");
+                        else
+                            printf(" ");
+                    }
+                    printf("]     │");
+                }
+                else
+                {
+                    printf("│                                                                          │");
+                }
+            }
+            else
+            {
+                // 设备已连接但还没开始读取，显示准备中
+                if (i == 3)
+                {
+                    printf("│                     Preparing to read thresholds...                      │");
+                }
+                else
+                {
+                    printf("│                                                                          │");
+                }
+            }
+        }
+        return;
+    }
+
+    // 正常显示阈值（设备已连接且阈值读取完成）
     // 处理触摸状态到矩阵
     bool touchMatrix[8][8] = {false};
     ProcessTouchStateBytes(usePlayer2 ? p2TouchState : p1TouchState, touchMatrix);
@@ -843,8 +951,21 @@ void DisplayThresholds()
         {
             printf("                        │");
         }
+    }
+}
 
-        // 按键部分
+void DisplayInputTest()
+{
+    // 保存当前文本属性
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    WORD defaultAttrs = csbi.wAttributes;
+    
+    // 显示Input Test的8行
+    for (int i = 0; i < 8; i++)
+    {
+        SetCursorPosition(76, 5 + i); 
+        
         if (i < BUTTONS_COUNT)
         {
             uint8_t buttons = usePlayer2 ? player2Buttons : player1Buttons;
@@ -875,7 +996,7 @@ void DisplayThresholds()
         }
         else
         {
-            printf("   │                      │");
+            printf("│                      │");
         }
     }
 }
@@ -1230,8 +1351,8 @@ void UpdateDeviceState()
     static DWORD lastHeartbeatTime = 0;
     DWORD currentTime = GetTickCount();
 
-    // 每500毫秒发送一次心跳
-    if (currentTime - lastHeartbeatTime >= 500)
+    // 每100毫秒发送一次心跳
+    if (heartbeatEnabled && currentTime - lastHeartbeatTime >= 100)
     {
         lastHeartbeatTime = currentTime;
 
@@ -1304,6 +1425,41 @@ void UpdateDeviceState()
     }
 }
 
+// 心跳控制函数
+void PauseHeartbeat()
+{
+    heartbeatEnabled = false;
+    heartbeatPauseStartTime = GetTickCount();
+    Sleep(300); // 等待300ms让心跳包超时
+}
+
+void ResumeHeartbeat()
+{
+    heartbeatEnabled = true;
+    heartbeatPauseStartTime = 0;
+}
+
+void CheckAndStartThresholdReading()
+{
+    // 检查1P设备
+    if (deviceState1p == DEVICE_OK && !thresholdReading1p && !thresholdComplete1p && isFirstConnection1p)
+    {
+        isFirstConnection1p = FALSE;
+        // 开始阈值读取
+        ReadAllThresholds(hPort1, &response1);
+        ReadTouchSheet(hPort1, &response1);
+    }
+    
+    // 检查2P设备
+    if (deviceState2p == DEVICE_OK && !thresholdReading2p && !thresholdComplete2p && isFirstConnection2p)
+    {
+        isFirstConnection2p = FALSE;
+        // 开始阈值读取
+        ReadAllThresholds(hPort2, &response2);
+        ReadTouchSheet(hPort2, &response2);
+    }
+}
+
 void TryConnectDevice(bool isPlayer1)
 {
     HANDLE *phPort = isPlayer1 ? &hPort1 : &hPort2;
@@ -1347,12 +1503,9 @@ void TryConnectDevice(bool isPlayer1)
         {
             *pDeviceState = DEVICE_OK;
             serial_scan_start(*phPort, pResponse);
-
-            if (isPlayer1)
-            {
-                ReadAllThresholds(*phPort, pResponse);
-                ReadTouchSheet(*phPort, pResponse);
-            }
+            
+            // 触发界面刷新显示设备已连接
+            dataChanged = true;
 
             connected = true;
         }
@@ -1394,6 +1547,11 @@ void ReconnectDevices()
         close_port(&hPort1);
 
         deviceState1p = DEVICE_WAIT;
+        // 重置阈值读取状态
+        thresholdReading1p = FALSE;
+        thresholdComplete1p = FALSE;
+        thresholdProgress1p = 0;
+        isFirstConnection1p = TRUE;
         dataChanged = true;
 
         // Sleep(100);
@@ -1418,10 +1576,8 @@ void ReconnectDevices()
             {
                 deviceState1p = DEVICE_OK;
                 serial_scan_start(hPort1, &response1);
-
-                // 成功连接后读取当前阈值
-                ReadAllThresholds(hPort1, &response1);
-                ReadTouchSheet(hPort1, &response1);
+                
+                // 触发界面刷新显示设备已连接，阈值读取将在主循环中处理
                 dataChanged = true;
                 break;
             }
@@ -1436,6 +1592,11 @@ void ReconnectDevices()
         close_port(&hPort2);
 
         deviceState2p = DEVICE_WAIT;
+        // 重置阈值读取状态
+        thresholdReading2p = FALSE;
+        thresholdComplete2p = FALSE;
+        thresholdProgress2p = 0;
+        isFirstConnection2p = TRUE;
         dataChanged = true;
 
         // Sleep(100);
@@ -1461,6 +1622,8 @@ void ReconnectDevices()
             {
                 deviceState2p = DEVICE_OK;
                 serial_scan_start(hPort2, &response2);
+                
+                // 触发界面刷新显示设备已连接，阈值读取将在主循环中处理
                 dataChanged = true;
                 break;
             }
@@ -1497,8 +1660,12 @@ void UpdateTouchData()
                 // 关闭当前端口连接
                 close_port(&hPort1);
 
-                // 更新设备状态为等待状态
+                // 更新设备状态为等待状态并重置阈值读取状态
                 deviceState1p = DEVICE_WAIT;
+                thresholdReading1p = FALSE;
+                thresholdComplete1p = FALSE;
+                thresholdProgress1p = 0;
+                isFirstConnection1p = TRUE;
                 dataChanged = true;
                 break;
             default:
@@ -1526,8 +1693,12 @@ void UpdateTouchData()
             // 关闭当前端口连接
             close_port(&hPort2);
 
-            // 更新设备状态
+            // 更新设备状态并重置阈值读取状态
             deviceState2p = DEVICE_WAIT;
+            thresholdReading2p = FALSE;
+            thresholdComplete2p = FALSE;
+            thresholdProgress2p = 0;
+            isFirstConnection2p = TRUE;
             dataChanged = true;
             break;
         }
@@ -1796,6 +1967,10 @@ void HandleKeyInput()
         case 63: // F5
             if (currentWindow == WINDOW_MAIN)
             {
+                // 显示准备消息
+                SetCursorPosition(0, 23);
+                printf("Preparing Threshold Modification...                                        ");
+                
                 /*
                 if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
                 {
@@ -1805,11 +1980,18 @@ void HandleKeyInput()
                     /*
                 }
                     */
+                    
+                // 清除准备消息
+                ClearLine(24);
             }
             break;
         case 64: // F6
             if (currentWindow == WINDOW_MAIN)
             {
+                // 显示准备消息
+                SetCursorPosition(0, 23);
+                printf("Preparing Touch Sheet Remapping...                                        ");
+                
                 /*
                 if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
                 {
@@ -1819,11 +2001,18 @@ void HandleKeyInput()
                     /*
                 }
                     */
+                    
+                // 清除准备消息
+                ClearLine(24);
             }
             break;
         case 65: // F7 - Modify Latency
             if (currentWindow == WINDOW_MAIN)
             {
+                // 显示准备消息
+                SetCursorPosition(0, 23);
+                printf("Preparing Latency Modification...                                          ");
+                
                 /*
                 if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
                 {
@@ -1833,6 +2022,9 @@ void HandleKeyInput()
                     /*
                 }
                     */
+                    
+                // 清除准备消息
+                ClearLine(23);
             }
             break;
         }
@@ -1876,6 +2068,9 @@ void InitThresholds()
 
 void ModifyThreshold()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
@@ -2137,6 +2332,9 @@ void ModifyThreshold()
 
     // 强制更新显示
     dataChanged = true;
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
@@ -2182,7 +2380,7 @@ uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
                         // 阈值为低字节在前，高字节在后
                         uint16_t value = (response->threshold[1] << 8) | response->threshold[0];
                         // 验证读取到的值是否合理（避免异常值）
-                        if (value <= 32767)
+                        if (value <= 16384)
                         {
                             thresholdReadFailed[index] = false; // 读取成功
                             return value;
@@ -2258,20 +2456,77 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response)
     {
         return;
     }
+    
+    // 确定是哪个设备
+    bool isPlayer1Device = (hPort == hPort1);
+    
+    // 设置读取状态
+    if (isPlayer1Device)
+    {
+        thresholdReading1p = TRUE;
+        thresholdProgress1p = 0;
+        thresholdComplete1p = FALSE;
+    }
+    else
+    {
+        thresholdReading2p = TRUE;
+        thresholdProgress2p = 0;
+        thresholdComplete2p = FALSE;
+    }
+    
+    // 暂停心跳包发送
+    PauseHeartbeat();
 
     // 读取所有34个区块的阈值，增加适当的延迟避免设备响应不及时
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
         touchThreshold[i] = ReadThreshold(hPort, response, i);
         
+        // 更新进度
+        if (isPlayer1Device)
+        {
+            thresholdProgress1p = i + 1;
+        }
+        else
+        {
+            thresholdProgress2p = i + 1;
+        }
+        
+        // 触发界面刷新并立即更新显示
+        dataChanged = true;
+        
+        // 强制刷新阈值显示部分
+        if (currentWindow == WINDOW_MAIN)
+        {
+            DisplayThresholds();
+        }
+        
         // 适当增加延迟，给设备更多反应时间
-        Sleep(20);
+        Sleep(5);
         
         // 可选：显示读取进度（调试用）
         #ifdef DEBUG
         printf("Reading threshold for region %d: %d\n", i, touchThreshold[i]);
         #endif
     }
+
+    // 完成阈值读取
+    if (isPlayer1Device)
+    {
+        thresholdReading1p = FALSE;
+        thresholdComplete1p = TRUE;
+    }
+    else
+    {
+        thresholdReading2p = FALSE;
+        thresholdComplete2p = TRUE;
+    }
+    
+    // 触发最终界面刷新
+    dataChanged = true;
+
+    // 暂停心跳包发送
+    ResumeHeartbeat();
 }
 
 bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
@@ -2280,6 +2535,9 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
     {
         return false;
     }
+
+    // 暂停心跳包发送
+    // PauseHeartbeat();
 
     // 清空串口缓冲区，避免残留数据干扰
     PurgeComm(hPort, PURGE_RXCLEAR | PURGE_TXCLEAR);
@@ -2381,8 +2639,13 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
     {
         memcpy(touchSheet, &buffer[3], TOUCH_REGIONS);
         return true;
+            
+        // 恢复心跳包发送
+        // ResumeHeartbeat();
     }
 
+    // 恢复心跳包发送
+    ResumeHeartbeat();
     return false; // 超时或未接收到足够数据
 }
 
@@ -2440,6 +2703,9 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
 
 void RemapTouchSheet()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
@@ -2745,6 +3011,9 @@ void RemapTouchSheet()
 
     // 强制更新显示
     dataChanged = true;
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 // 连接Kobato设备并初始化
@@ -2988,6 +3257,9 @@ void ReconnectKobato()
 
 void SaveSettings()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     FILE *file = fopen("curva.ini", "wb");
     if (file == NULL)
     {
@@ -3078,10 +3350,16 @@ void SaveSettings()
     {
         ClearLine(i);
     }
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 void LoadSettings()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     FILE *file = fopen("curva.ini", "rb");
     if (file == NULL)
     {
@@ -3312,6 +3590,9 @@ void LoadSettings()
     {
         ClearLine(i);
     }
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 void ReadLatencySettings(HANDLE hPort, serial_packet_t *response)
@@ -3435,6 +3716,8 @@ bool WriteLatencySettings(HANDLE hPort, serial_packet_t *response, uint8_t type,
 // 修改延迟设置函数
 void ModifyLatency()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
@@ -3564,6 +3847,9 @@ void ModifyLatency()
 
     // 强制更新显示
     dataChanged = true;
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 void StartAutoRemap() 
