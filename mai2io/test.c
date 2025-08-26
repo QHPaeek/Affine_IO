@@ -21,7 +21,7 @@
 
 /* ---------- 常量定义 ---------- */
 // 版本号
-const char *VERSION = "v0.8";
+const char *VERSION = "v0.8c";
 
 // 触摸和按键相关常量
 #define TOUCH_REGIONS 34        // 触摸区域总数
@@ -180,6 +180,9 @@ char *firmware_status_message = NULL;        // 状态信息
 static HANDLE hBootPort = INVALID_HANDLE_VALUE;
 static unsigned char *firmware_data = NULL;
 static unsigned int firmware_data_len = 0;
+// 自动更新模式
+static volatile BOOL firmware_auto_mode = FALSE;   // 按下'1'后进入自动等待模式
+static HANDLE hAutoUpdateThread = NULL;            // 自动更新线程句柄（仅用于调试，可不持有）
 
 // 自动映射相关变量
 bool autoRemapActive = false;            // 自动映射是否激活
@@ -260,12 +263,21 @@ void StartFirmwareUpdate(void);
 bool FindFirmwareFile(void);
 void PrepareForFirmwareUpdate();
 void SetFirmwareStatusMessage(const char *msg);
+DWORD WINAPI AutoUpdateWaitThread(LPVOID lpParam);
 
 // 阈值转换辅助函数
 static inline uint16_t threshold_to_display(uint16_t threshold)
 {
-    // 使用四舍五入避免精度损失
-    return (uint16_t)((threshold * 999 + 8192) / 16384);
+    // 处理读取失败的特殊值
+    if (threshold == THRESHOLD_READ_FAILED)
+    {
+        return 0; // 读取失败时显示为0
+    }
+    
+    // 简单整数除法 + 1作为精度损失补偿
+    uint16_t result = (uint16_t)((threshold * 999) / 16384) + 1;
+    // 自动加1补偿整数除法的精度损失，但不超过999
+    return (result < 999) ? (result + 1) : 999;
 }
 
 // 格式化阈值显示，读取失败时显示UNK
@@ -283,8 +295,20 @@ static inline void format_threshold_display(char *buffer, int index)
 
 static inline uint16_t display_to_threshold(uint16_t display)
 {
-    // 使用四舍五入避免精度损失
-    return (uint16_t)((uint32_t)display * 16384 + 499) / 999;
+    // 处理边界情况：显示值为0时应该返回最小有效阈值而不是0
+    if (display == 0)
+    {
+        return 1; // 最小阈值为1，避免真正的0值
+    }
+    
+    // 由于显示时自动加了1，这里需要减1来平衡
+    if (display > 1)
+    {
+        display = display - 1;
+    }
+    
+    // 简单整数除法
+    return (uint16_t)((uint32_t)display * 16384 / 999);
 }
 
 int main()
@@ -1863,10 +1887,30 @@ void HandleKeyInput()
     case 'B':
         if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
         {
+            // 退出前取消自动模式
+            firmware_auto_mode = FALSE;
             currentWindow = WINDOW_MAIN;
             system("cls");
             firmwareWindowDrawn = false; // 重置固件窗口绘制标志
             dataChanged = true;
+        }
+        break;
+    case '1': // 开启自动更新等待：检测到CH340即开始写入
+        if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
+        {
+            if (!firmware_auto_mode)
+            {
+                firmware_auto_mode = TRUE;
+                // 显示等待状态
+                SetFirmwareStatusMessage("Waiting");
+                dataChanged = true;
+                // 启动后台等待线程
+                HANDLE h = CreateThread(NULL, 0, AutoUpdateWaitThread, NULL, 0, NULL);
+                if (h)
+                {
+                    CloseHandle(h);
+                }
+            }
         }
         break;
     case 'n': // 切换玩家
@@ -1943,6 +1987,8 @@ void HandleKeyInput()
             }
             else if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
             {
+                // 返回主界面时取消自动模式
+                firmware_auto_mode = FALSE;
                 currentWindow = WINDOW_MAIN;
                 system("cls");
                 firmwareWindowDrawn = false; // 重置固件窗口绘制标志
@@ -2477,10 +2523,49 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response)
     // 暂停心跳包发送
     PauseHeartbeat();
 
-    // 读取所有34个区块的阈值，增加适当的延迟避免设备响应不及时
+    // 添加10秒超时检测
+    DWORD thresholdStartTime = GetTickCount();
+    const DWORD THRESHOLD_TIMEOUT_MS = 10000; // 10秒超时
+
+    // 读取所有34个区块的阈值
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
-        touchThreshold[i] = ReadThreshold(hPort, response, i);
+        // 检查超时
+        if ((GetTickCount() - thresholdStartTime) > THRESHOLD_TIMEOUT_MS)
+        {
+            // 超时处理
+            printf("[ERROR] Threshold reading timeout (>10s) - Device State Fail\n");
+            
+            // 设置设备状态为失败
+            if (isPlayer1Device)
+            {
+                deviceState1p = DEVICE_FAIL;
+                thresholdReading1p = FALSE;
+                thresholdComplete1p = FALSE;
+            }
+            else
+            {
+                deviceState2p = DEVICE_FAIL;
+                thresholdReading2p = FALSE;
+                thresholdComplete2p = FALSE;
+            }
+            
+            // 恢复心跳包发送
+            ResumeHeartbeat();
+            
+            // 触发界面刷新显示错误状态
+            dataChanged = true;
+            return;
+        }
+        
+        uint16_t readValue = ReadThreshold(hPort, response, i);
+        
+        // 只有读取成功时才更新阈值，失败时保持原值
+        if (readValue != THRESHOLD_READ_FAILED)
+        {
+            touchThreshold[i] = readValue;
+        }
+        // 如果读取失败，thresholdReadFailed[i]已经在ReadThreshold中被设置为true
         
         // 更新进度
         if (isPlayer1Device)
@@ -3392,6 +3477,8 @@ void LoadSettings()
     bool thresholdsChanged = false;
     bool touchSheetChanged = false;
     bool latencyChanged = false;
+    bool isOldVersion = false; // 标记是否为0.8以前的版本
+    char loadedVersion[32] = ""; // 存储读取的版本号
 
     // 临时存储读取的延迟值
     unsigned int loadedTouchLatency = 0;
@@ -3414,7 +3501,35 @@ void LoadSettings()
         }
 
         // 处理不同区块的数据
-        if (strcmp(section, "Thresholds") == 0)
+        if (strcmp(section, "Curva Settings") == 0)
+        {
+            // 处理版本信息
+            char key[20];
+            char value[32];
+            if (sscanf(line, "%[^=]=%s", key, value) == 2)
+            {
+                if (strcmp(key, "Version") == 0)
+                {
+                    strncpy(loadedVersion, value, sizeof(loadedVersion) - 1);
+                    loadedVersion[sizeof(loadedVersion) - 1] = '\0';
+                    
+                    // 检查是否为0.8以前的版本
+                    // 版本格式：v0.7c, v0.8a 等
+                    if (strlen(loadedVersion) >= 3 && loadedVersion[0] == 'v')
+                    {
+                        float version = 0.0f;
+                        if (sscanf(loadedVersion + 1, "%f", &version) == 1)
+                        {
+                            if (version < 0.8f)
+                            {
+                                isOldVersion = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else if (strcmp(section, "Thresholds") == 0)
         {
             // A1=500 格式的阈值数据（0-999范围）
             char key[10];
@@ -3426,6 +3541,17 @@ void LoadSettings()
                 {
                     if (strcmp(key, blockLabels[i]) == 0 && displayValue <= 999)
                     {
+                        // 如果是0.8以前的版本，将阈值乘以2
+                        if (isOldVersion)
+                        {
+                            displayValue = displayValue * 2;
+                            // 确保不超过999的最大值
+                            if (displayValue > 999)
+                            {
+                                displayValue = 999;
+                            }
+                        }
+                        
                         // 将0-999的显示值转换回0-65535的实际值
                         touchThreshold[i] = display_to_threshold((uint16_t)displayValue);
                         thresholdsChanged = true;
@@ -3560,7 +3686,14 @@ void LoadSettings()
             (latencyChanged && latencySuccess))
         {
             SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-            printf("Settings loaded from curva.ini successfully!");
+            if (isOldVersion && thresholdsChanged)
+            {
+                printf("Settings loaded from curva.ini successfully! (Old version %s detected - thresholds doubled)", loadedVersion);
+            }
+            else
+            {
+                printf("Settings loaded from curva.ini successfully!");
+            }
 
             if (deviceState1p == DEVICE_OK)
             {
@@ -4648,6 +4781,47 @@ void SetFirmwareStatusMessage(const char *msg)
     dataChanged = true;
 }
 
+// 自动更新等待线程：等待检测到CH340后直接启动更新
+DWORD WINAPI AutoUpdateWaitThread(LPVOID lpParam)
+{
+    // 持续等待CH340“插入”事件：由不存在 -> 存在 的边沿触发
+    BOOL was_present = FALSE;
+    while (firmware_auto_mode && currentWindow == WINDOW_FIRMWARE_UPDATE)
+    {
+        char port[32] = {0};
+        BOOL present = find_ch340_port(port, sizeof(port)) ? TRUE : FALSE;
+
+        // 边沿触发：仅在上一轮不存在，本轮出现，且当前未在更新时触发
+        if (!was_present && present && !firmware_updating)
+        {
+            if (!firmware_update_ready || firmware_data == NULL)
+            {
+                firmware_update_ready = FindFirmwareFile();
+            }
+
+            if (firmware_update_ready)
+            {
+                StartFirmwareUpdate();
+            }
+            // 若未找到固件，则继续保持等待
+        }
+
+        was_present = present;
+
+        // 轮询间隔
+        for (int i = 0; i < 10; ++i)
+        {
+            if (!firmware_auto_mode || currentWindow != WINDOW_FIRMWARE_UPDATE)
+            {
+                break;
+            }
+            Sleep(50);
+        }
+    }
+
+    return 0;
+}
+
 // 固件更新线程
 DWORD WINAPI UpdateFirmwareThread(LPVOID lpParam)
 {
@@ -4780,6 +4954,11 @@ DWORD WINAPI UpdateFirmwareThread(LPVOID lpParam)
     // 清理
     cleanup_firmware();
     firmware_updating = false;
+    // 如果仍处于自动模式，则继续等待下一次插入
+    if (firmware_auto_mode && currentWindow == WINDOW_FIRMWARE_UPDATE)
+    {
+        SetFirmwareStatusMessage("Waiting");
+    }
     return 0;
 }
 

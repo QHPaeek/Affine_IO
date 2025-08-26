@@ -2,3 +2,6 @@
 *.exe
 *.dll
 *.ini
+
+*.bat
+*.ps1
