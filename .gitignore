@@ -5,3 +5,5 @@
 
 *.bat
 *.ps1
+
+/AffineLoad

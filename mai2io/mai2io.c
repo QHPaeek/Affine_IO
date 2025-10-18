@@ -57,7 +57,7 @@ uint16_t mai2_io_get_api_version(void)
 
 HRESULT mai2_io_init(void)
 {
-    dprintf("[Affine IO] Initializing mai2_io\n");
+    dprintf("[Affine IO] Initializing Mai2IO\n");
     mai2_io_config_load(&mai2_io_cfg, L".\\segatools.ini");
     //read_json_to_threshold("curva_config.json", touch_threshold);
     return S_OK;
