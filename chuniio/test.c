@@ -4,7 +4,9 @@
 
 extern char comPort[13];
 char *vid = "VID_AFF1";
-char *pid = "PID_52A4";
+char *pid_legacy = "PID_52A4";
+char *pid_c = "PID_52A7";
+char *current_pid = NULL;
 
 #define WIDTH 16
 #define HEIGHT 2
@@ -12,7 +14,7 @@ char *pid = "PID_52A4";
 
 uint8_t airStatus = 0; // Air status variable
 
-const char *VERSION = "v0.2";
+const char *VERSION = "v0.3a";
 
 typedef enum
 {
@@ -27,7 +29,23 @@ void DisplayHeader(HANDLE hConsole, DeviceState state)
     SetConsoleCursorPosition(hConsole, pos);
 
     // 修改程序标题
-    printf("Linnea Test Tools %s\n", VERSION);
+    printf("Linnea Series Test Tools %s\n", VERSION);
+
+    printf("Product Series: ");
+    // 根据PID显示产品系列
+    if (current_pid == pid_legacy)
+    {
+        printf("Linnea Legacy");
+    }
+    else if (current_pid == pid_c)
+    {
+        printf("Linnea C");
+    }
+    else
+    {
+        printf("N/A");
+    }
+    printf("\n");
 
     // State
     printf("Device State: ");
@@ -61,101 +79,104 @@ void DisplaySectionTitle(HANDLE hConsole, const char *title, int row, int column
 
 void DisplayGroundSlider(HANDLE hConsole, int data[HEIGHT][WIDTH])
 {
-    COORD startPos = {0, 3};
-    
+    COORD startPos = {0, 4};
+
     SetConsoleCursorPosition(hConsole, startPos);
     printf("┌─────────────────────────────────────────── Touch Values ──────────────────────────────────────┐");
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 1});
     printf("│");
     for (int x = 0; x < WIDTH; x++)
     {
         printf("     │");
     }
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 2});
     printf("│");
     for (int x = 0; x < WIDTH; x++)
     {
         if (data[0][x] > THRESHOLD)
             SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
-        
-        printf(" %3d ", data[0][x]);  
-        
+
+        printf(" %3d ", data[0][x]);
+
         SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
         printf("│");
     }
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 3});
     printf("│");
     for (int x = 0; x < WIDTH; x++)
     {
         printf("     │");
     }
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 4});
     printf("├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┤");
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 5});
     printf("│");
     for (int x = 0; x < WIDTH; x++)
     {
         printf("     │");
     }
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 6});
     printf("│");
     for (int x = 0; x < WIDTH; x++)
     {
         if (data[1][x] > THRESHOLD)
             SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
-        
-        printf(" %3d ", data[1][x]);  
-        
+
+        printf(" %3d ", data[1][x]);
+
         SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
         printf("│");
     }
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 7});
     printf("│");
     for (int x = 0; x < WIDTH; x++)
     {
         printf("     │");
     }
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X, startPos.Y + 8});
     printf("└───────────────────────────────────────────────────────────────────────────────────────────────┘");
 }
 
 void DisplayAirStatus(HANDLE hConsole, uint8_t status)
 {
-    COORD startPos = {WIDTH * 5 + 17, 3}; 
-    
+    COORD startPos = {WIDTH * 5 + 17, 4};
+
     SetConsoleCursorPosition(hConsole, startPos);
     printf("  ┌──── IR States ────┐");
-    
+
     for (int i = 0; i < 6; i++)
     {
         int sensorNum = 6 - i;
         SetConsoleCursorPosition(hConsole, (COORD){startPos.X + 2, startPos.Y + i + 1});
-        
+
         printf("│   IR_%d     ", sensorNum);
-        
+
         bool isActive = (status & (1 << (sensorNum - 1))) != 0;
-        if (isActive) {
+        if (isActive)
+        {
             SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
             printf("ON ");
-        } else {
+        }
+        else
+        {
             printf("OFF");
         }
-        
+
         SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED);
         printf("    │");
     }
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X + 2, startPos.Y + 7});
     printf("│ WHITE LED WHEN ON │");
-    
+
     SetConsoleCursorPosition(hConsole, (COORD){startPos.X + 2, startPos.Y + 8});
     printf("└───────────────────┘");
 }
@@ -180,7 +201,7 @@ int main()
     SMALL_RECT windowSize = {0, 0, 99, 29};
     SetConsoleScreenBufferSize(hConsole, bufferSize);
     SetConsoleWindowInfo(hConsole, TRUE, &windowSize);
-    
+
     CONSOLE_CURSOR_INFO cursorInfo;
     GetConsoleCursorInfo(hConsole, &cursorInfo);
     cursorInfo.bVisible = FALSE;
@@ -191,7 +212,31 @@ int main()
 
     int consoleWidth = WIDTH * 6 + 22;
 
-    memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
+    memcpy(comPort, GetSerialPortByVidPid(vid, pid_legacy), 6);
+
+    if (comPort[0] != 0)
+    {
+        current_pid = pid_legacy;
+    }
+    else
+    {
+        memcpy(comPort, GetSerialPortByVidPid(vid, pid_c), 6);
+
+        if (comPort[0] != 0)
+        {
+            current_pid = pid_c;
+        }
+        else
+        {
+            current_pid = NULL;
+        }
+    }
+
+    if (comPort[0] == 0)
+    {
+        char *default_comPort = "COM1";
+        memcpy(comPort, default_comPort, 5);
+    }
 
     if (comPort[0] == 0)
     {
@@ -231,19 +276,19 @@ int main()
     int data[HEIGHT][WIDTH] = {
         {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
-    
+
     uint8_t rgb[93] = {
         255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,
         255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,255,255,0,
     };
-    
+
     // 初始绘制UI
     DisplayGroundSlider(hConsole, data);
     DisplayAirStatus(hConsole, airStatus);
-    
+
     slider_send_leds(rgb);
     package_init(&reponse);
-    
+
     while (1)
     {
         for (uint8_t i = 0; i < 100; i++)
@@ -262,22 +307,22 @@ int main()
                 }
                 package_init(&reponse);
                 DisplayGroundSlider(hConsole, data);
-                DisplayAirStatus(hConsole, airStatus); 
+                DisplayAirStatus(hConsole, airStatus);
                 break;
-                
+
             case SLIDER_CMD_AUTO_AIR:
-                airStatus = reponse._air_status; 
+                airStatus = reponse._air_status;
                 package_init(&reponse);
-                DisplayAirStatus(hConsole, airStatus); 
+                DisplayAirStatus(hConsole, airStatus);
                 break;
 
             case 0xff:
                 memset(data, 0, sizeof(data));
-                airStatus = 0; 
+                airStatus = 0;
                 deviceState = DEVICE_FAIL;
                 DisplayHeader(hConsole, deviceState);
                 DisplayGroundSlider(hConsole, data);
-                DisplayAirStatus(hConsole, airStatus); 
+                DisplayAirStatus(hConsole, airStatus);
 
                 close_port();
                 COORD statusPos = {0, HEIGHT + 12};
@@ -295,8 +340,26 @@ int main()
                 while (!open_port())
                 {
                     close_port();
-                    memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
-                    
+                    memcpy(comPort, GetSerialPortByVidPid(vid, pid_legacy), 6);
+
+                    if (comPort[0] != 0)
+                    {
+                        current_pid = pid_legacy;
+                    }
+                    else
+                    {
+                        memcpy(comPort, GetSerialPortByVidPid(vid, pid_c), 6);
+
+                        if (comPort[0] != 0)
+                        {
+                            current_pid = pid_c;
+                        }
+                        else
+                        {
+                            current_pid = NULL;
+                        }
+                    }
+
                     if (comPort[0] == 0)
                     {
                         char *default_comPort = "COM1";
@@ -317,7 +380,7 @@ int main()
                         int port_num = (comPort[3] - '0') * 100 + (comPort[4] - '0') * 10 + (comPort[5] - '0');
                         snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
                     }
-                    
+
                     Sleep(1);
                 }
 
@@ -337,7 +400,7 @@ int main()
                 slider_start_air_scan();
                 slider_start_scan();
                 break;
-                
+
             default:
                 break;
             }

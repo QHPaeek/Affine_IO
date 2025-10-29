@@ -1,0 +1,9 @@
+*.bin
+*.exe
+*.dll
+*.ini
+
+*.bat
+*.ps1
+
+/AffineLoad

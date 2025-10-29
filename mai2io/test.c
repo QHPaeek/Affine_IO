@@ -9,40 +9,45 @@
 #include <stdbool.h>
 #include <conio.h>
 #include <wchar.h>
-#include "serial.h"
-#include "dprintf.h"
 #include <setupapi.h>
 #include <devguid.h>
 
-// 外部变量
-extern char comPort1[13];
-extern char comPort2[13];
-extern HANDLE hPort1;
-extern HANDLE hPort2;
-extern serial_packet_t response1;
-extern serial_packet_t response2;
-extern void package_init(serial_packet_t *response);
-extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
+/* ---------- 项目头文件 ---------- */
+#include "serial.h"
+#include "dprintf.h"
 
-// 调试开关
+/* ---------- 调试设置 ---------- */
 // #define DEBUG
 
-// 常量定义
+/* ---------- 常量定义 ---------- */
+// 版本号
+const char *VERSION = "v0.8c";
+
+// 触摸和按键相关常量
 #define TOUCH_REGIONS 34        // 触摸区域总数
 #define BUTTONS_COUNT 8         // 按钮总数
 #define THRESHOLD_DEFAULT 16384 // 默认阈值
+#define THRESHOLD_READ_FAILED 65535 // 标记读取失败的特殊值
+
+// 连接和重连常量
 #define INIT_CONNECT_ATTEMPTS 5
 #define RECONNECT_INTERVAL 500
 
-// 版本号定义
-const char *VERSION = "v0.6";
-
-// 颜色定义
+// 控制台颜色定义
 #define COLOR_RED (FOREGROUND_RED | FOREGROUND_INTENSITY)
 #define COLOR_GREEN (FOREGROUND_GREEN | FOREGROUND_INTENSITY)
 #define COLOR_BLUE (FOREGROUND_BLUE | FOREGROUND_INTENSITY)
 #define COLOR_DEFAULT (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE)
 
+// 固件更新相关常量
+#define VID_CH340 0x1A86
+#define PID_CH340 0x7523
+#define BAUDRATE_BOOT 115200
+#define PAGE_SZ 256
+#define ERASE_RETRY 3
+#define SYNC_TIMEOUT_MS 2000
+
+/* ---------- 类型定义 ---------- */
 // 设备状态枚举
 typedef enum
 {
@@ -59,47 +64,72 @@ typedef enum
     WINDOW_FIRMWARE_UPDATE
 } WindowType;
 
+// 连接参数结构体
 typedef struct
 {
     bool isPlayer1;
 } DeviceConnectParams;
 
-// 全局变量
+/* ---------- 外部变量声明 ---------- */
+extern char comPort1[13];
+extern char comPort2[13];
+extern HANDLE hPort1;
+extern HANDLE hPort2;
+extern serial_packet_t response1;
+extern serial_packet_t response2;
+extern void package_init(serial_packet_t *response);
+extern void serial_writeresp(HANDLE hPortx, serial_packet_t *response);
+
+/* ---------- 全局变量 ---------- */
+// 窗口和UI相关
 WindowType currentWindow = WINDOW_MAIN;
-DeviceState deviceState1p = DEVICE_WAIT;
-DeviceState deviceState2p = DEVICE_WAIT;
-bool isFirstConnection1p = TRUE;
-bool isFirstConnection2p = TRUE;
-bool ledButtonsTest = FALSE;
-bool ledControllerTest = FALSE;
-// bool showRawData = FALSE;
-bool remapTouchSheet = FALSE;
-bool usePlayer2 = FALSE; // 控制是否切换到2P模式
 HANDLE hConsole;
-int consoleWidth = 100;
+int consoleWidth = 120;
 int consoleHeight = 36;
 bool running = true;
+bool firmwareWindowDrawn = false;
+
+// 设备状态变量
+DeviceState deviceState1p = DEVICE_WAIT;
+DeviceState deviceState2p = DEVICE_WAIT;
+DeviceState deviceStateKobato = DEVICE_WAIT;
+bool isFirstConnection1p = TRUE;
+bool isFirstConnection2p = TRUE;
+bool usePlayer2 = FALSE; // 控制是否切换到2P模式
+
+// 阈值读取状态变量
+bool thresholdReading1p = FALSE;
+bool thresholdReading2p = FALSE;
+int thresholdProgress1p = 0;  // 0-34，当前读取进度
+int thresholdProgress2p = 0;  // 0-34，当前读取进度
+bool thresholdComplete1p = FALSE;
+bool thresholdComplete2p = FALSE;
+
+// 设备连接配置
 char *Vid = "VID_AFF1";
 char *Pid_1p = "PID_52A5";
 char *Pid_2p = "PID_52A6";
-
-// Kobato设备VID/PID
 char *Vid_Kobato = "VID_0483";
 char *Pid_Kobato = "PID_5740";
-
-DeviceState deviceStateKobato = DEVICE_WAIT;
 HANDLE hPortKobato = INVALID_HANDLE_VALUE;
 char comPortKobato[13] = {0};
+
+// Kobato设备特性配置
 bool kobatoHighBaud = FALSE;
 bool kobatoLedEnabled = FALSE;
 uint8_t kobatoLedBrightness = 0;
 bool kobatoExtendEnabled = FALSE;
 bool kobatoReflectEnabled = FALSE;
 
+// 测试和功能标志
+bool ledButtonsTest = FALSE;
+bool ledControllerTest = FALSE;
+// bool showRawData = FALSE;
+bool remapTouchSheet = FALSE;
+
 // 多按键检测相关变量
-// 光眼无法物理检测是否连接，只能程序测试
 DWORD buttonPressStartTime = 0; // 按键同时按下的起始时间
-bool buttonFailMode = false;    // 标记按键是否进入FAIL模式
+bool buttonFailMode = false;    // 标记按键是否进入FAIL
 int previousButtonCount = 0;    // 之前按下的按键数量
 
 // 玩家输入状态
@@ -114,78 +144,31 @@ uint8_t prev_player1Buttons = 0;
 uint8_t prev_player2Buttons = 0;
 uint8_t prev_opButtons = 0;
 
+// 延迟设置相关
 uint8_t touchLatency = 0;
 uint8_t buttonLatency = 0;
 bool latencyRead = false;
 
-// 原始值数组
-// 这个现在没用
+// 触摸和阈值数据
+// 原始值现在没用
 uint8_t p1RawValue[34] = {0};
 uint8_t p2RawValue[34] = {0};
-
-uint8_t touchSheet[TOUCH_REGIONS] = {0};
-
-uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index);
+// 触摸映射表: touchSheet[区域索引] = 物理通道
+// 例如: touchSheet[0] = 5 表示A1区域映射到物理通道5
+uint8_t touchSheet[TOUCH_REGIONS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33};
+uint16_t touchThreshold[TOUCH_REGIONS] = {0};
+bool thresholdReadFailed[TOUCH_REGIONS] = {false}; // 标记哪些区域读取失败
 
 // LED状态
 uint8_t buttonLEDs[24] = {0};
 uint8_t fetLEDs[3] = {0};
 
-// 阈值数据
-uint16_t touchThreshold[TOUCH_REGIONS] = {0};
-
 // 缓冲区状态
 bool dataChanged = true;
 
-// 函数声明
-void DisplayHeader(DeviceState state1p, DeviceState state2p);
-void DisplayMainWindow();
-void DisplayTouchPanelWindow();
-void SwitchWindow();
-void SwitchPlayer();
-void HandleKeyInput();
-void UpdateDeviceState();
-void ReconnectDevices();
-void UpdateButtonLEDs();
-void UpdateTouchData();
-void UpdateMultiButtonState();
-void SetCursorPosition(int x, int y);
-void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8]);
-void DisplayThresholds();
-void DisplayButtons();
-void ModifyThreshold();
-void InitThresholds();
-bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index);
-// void SendThresholds(HANDLE hPort, serial_packet_t *response);
-// void DisplayRawData(uint8_t *touchState, uint8_t *rawValue);
-void ReadAllThresholds(HANDLE hPort, serial_packet_t *response);
-
-bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response);
-bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response);
-void RemapTouchSheet();
-
-void ReadLatencySettings(HANDLE hPort, serial_packet_t *response);
-bool WriteLatencySettings(HANDLE hPort, serial_packet_t *response, uint8_t type, uint8_t value);
-void ModifyLatency();
-
-void SaveSettings();
-void LoadSettings();
-
-// Kobato函数声明
-void ConnectKobato();
-bool ReadKobatoStatus();
-void ReconnectKobato();
-
-void TryConnectDevice(bool isPlayer1);
-
-bool IsDataChanged();
-void ClearLine(int line);
-
-void DisplayFirmwareUpdateWindow();
-void StartFirmwareUpdate(void);
-bool FindFirmwareFile(void);
-void PrepareForFirmwareUpdate();
-void SetFirmwareStatusMessage(const char *msg);
+// 心跳控制变量
+bool heartbeatEnabled = true;         // 心跳是否启用
+DWORD heartbeatPauseStartTime = 0;    // 心跳暂停开始时间
 
 // 固件更新相关变量
 bool firmware_update_ready = false;          // 是否找到可更新的固件
@@ -194,30 +177,138 @@ int firmware_update_progress = 0;            // 更新进度 (0-100)
 wchar_t firmware_version[32] = L"v1.000000"; // 固件版本
 wchar_t firmware_path[MAX_PATH] = {0};       // 固件路径
 char *firmware_status_message = NULL;        // 状态信息
-
-/* ----- 固件更新相关常量 ----- */
-#define VID_CH340 0x1A86
-#define PID_CH340_G 0x7523
-#define PID_CH340_X 0x55D4
-#define BAUDRATE_BOOT 115200
-#define PAGE_SZ 256
-#define ERASE_RETRY 3
-#define SYNC_TIMEOUT_MS 2000
-
-/* ----- 固件更新全局变量 ----- */
 static HANDLE hBootPort = INVALID_HANDLE_VALUE;
 static unsigned char *firmware_data = NULL;
 static unsigned int firmware_data_len = 0;
+// 自动更新模式
+static volatile BOOL firmware_auto_mode = FALSE;   // 按下'1'后进入自动等待模式
+static HANDLE hAutoUpdateThread = NULL;            // 自动更新线程句柄（仅用于调试，可不持有）
+
+// 自动映射相关变量
+bool autoRemapActive = false;            // 自动映射是否激活
+int autoRemapStage = 0;                  // 当前收集阶段（0-3）
+int autoRemapCollected = 0;              // 当前阶段已收集的区块数
+int autoRemapCompletedStages = 0;        // 已完成的阶段数（0-4）
+DWORD autoRemapLastTime = 0;             // 上次收集时间
+uint8_t autoRemapRegions[TOUCH_REGIONS]; // 记录按触发顺序收集的区块
+char autoRemapStatus[32] = {0};          // 状态消息
+bool autoRemapCompletedRegions[TOUCH_REGIONS] = {false}; // 标记已完成的区块
+uint8_t prevTouchMatrix[8][8] = {0};     // 上一帧的触摸状态矩阵
+
+/* ---------- 函数声明 ---------- */
+// 阈值读取辅助函数
+uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index);
+
+// 显示和UI相关函数
+void DisplayHeader(DeviceState state1p, DeviceState state2p);
+void DisplayMainWindow();
+void DisplayTouchPanelWindow();
+void DisplayFirmwareUpdateWindow();
+void SetCursorPosition(int x, int y);
+void ClearLine(int line);
+void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8]);
+void DisplayThresholds();
+void DisplayInputTest();
+void DisplayButtons();
+void UpdateFirmwareProgressOnly();
+
+// 操作和控制函数
+void SwitchWindow();
+void SwitchPlayer();
+void HandleKeyInput();
+void UpdateDeviceState();
+void TryConnectDevice(bool isPlayer1);
+void ReconnectDevices();
+void UpdateButtonLEDs();
+void UpdateTouchData();
+void UpdateMultiButtonState();
+bool IsDataChanged();
+
+// 心跳控制函数
+void PauseHeartbeat();
+void ResumeHeartbeat();
+void CheckAndStartThresholdReading(); // 检查并开始阈值读取
+
+// 阈值和触摸配置相关函数
+void ModifyThreshold();
+void InitThresholds();
+bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index);
+void ReadAllThresholds(HANDLE hPort, serial_packet_t *response);
+bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response);
+bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response);
+void RemapTouchSheet();
+void ReadLatencySettings(HANDLE hPort, serial_packet_t *response);
+bool WriteLatencySettings(HANDLE hPort, serial_packet_t *response, uint8_t type, uint8_t value);
+void ModifyLatency();
+void CheckAndStartThresholdReading(); // 检查并开始阈值读取
+
+// 配置文件操作
+void SaveSettings();
+void LoadSettings();
+
+// 自动映射相关函数
+void StartAutoRemap();            // 开始自动映射
+void StopAutoRemap(bool success); // 停止自动映射
+void UpdateAutoRemap();           // 更新自动映射状态
+void ProcessAutoRemapTouch();     // 处理自动映射时的触摸
+void CompleteAutoRemap();         // 完成自动映射并应用
+
+// Kobato设备函数
+void ConnectKobato();
+bool ReadKobatoStatus();
+void ReconnectKobato();
+
+// 固件更新相关函数
+void StartFirmwareUpdate(void);
+bool FindFirmwareFile(void);
+void PrepareForFirmwareUpdate();
+void SetFirmwareStatusMessage(const char *msg);
+DWORD WINAPI AutoUpdateWaitThread(LPVOID lpParam);
 
 // 阈值转换辅助函数
 static inline uint16_t threshold_to_display(uint16_t threshold)
 {
-    return (uint16_t)((threshold * 999) / 32767);
+    // 处理读取失败的特殊值
+    if (threshold == THRESHOLD_READ_FAILED)
+    {
+        return 0; // 读取失败时显示为0
+    }
+    
+    // 简单整数除法 + 1作为精度损失补偿
+    uint16_t result = (uint16_t)((threshold * 999) / 16384) + 1;
+    // 自动加1补偿整数除法的精度损失，但不超过999
+    return (result < 999) ? (result + 1) : 999;
+}
+
+// 格式化阈值显示，读取失败时显示UNK
+static inline void format_threshold_display(char *buffer, int index)
+{
+    if (thresholdReadFailed[index])
+    {
+        strcpy(buffer, "UNK/999");
+    }
+    else
+    {
+        sprintf(buffer, "%3d/999", threshold_to_display(touchThreshold[index]));
+    }
 }
 
 static inline uint16_t display_to_threshold(uint16_t display)
 {
-    return (uint16_t)((uint32_t)display * 32767 / 999);
+    // 处理边界情况：显示值为0时应该返回最小有效阈值而不是0
+    if (display == 0)
+    {
+        return 1; // 最小阈值为1，避免真正的0值
+    }
+    
+    // 由于显示时自动加了1，这里需要减1来平衡
+    if (display > 1)
+    {
+        display = display - 1;
+    }
+    
+    // 简单整数除法
+    return (uint16_t)((uint32_t)display * 16384 / 999);
 }
 
 int main()
@@ -281,9 +372,18 @@ int main()
             dataChanged = true;
         }
 
+        // 检查是否需要开始阈值读取
+        CheckAndStartThresholdReading();
+
         // 更新设备状态和数据
         UpdateDeviceState();
         UpdateTouchData();
+
+        if (autoRemapActive)
+        {
+            UpdateAutoRemap();
+            ProcessAutoRemapTouch();
+        }
 
         // 只有数据变化时才刷新屏幕
         if (dataChanged || IsDataChanged())
@@ -293,14 +393,24 @@ int main()
             if (currentWindow == WINDOW_MAIN)
             {
                 DisplayMainWindow();
+                firmwareWindowDrawn = false;
             }
             else if (currentWindow == WINDOW_TOUCHPANEL)
             {
                 DisplayTouchPanelWindow();
+                firmwareWindowDrawn = false;
             }
             else if (currentWindow == WINDOW_FIRMWARE_UPDATE)
             {
-                DisplayFirmwareUpdateWindow();
+                if (!firmwareWindowDrawn)
+                {
+                    DisplayFirmwareUpdateWindow();
+                    firmwareWindowDrawn = true;
+                }
+                else
+                {
+                    UpdateFirmwareProgressOnly();
+                }
             }
 
             dataChanged = false;
@@ -462,6 +572,9 @@ void DisplayMainWindow()
 
     // 显示阈值数据
     DisplayThresholds();
+    
+    // 显示Input Test（总是显示）
+    DisplayInputTest();
 
     SetCursorPosition(0, 13);
     printf("└──────────────────────────────────────────────────────────────────────────┘   └──────────────────────┘");
@@ -699,6 +812,87 @@ void DisplayThresholds()
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
 
+    // 检查设备状态
+    bool device1pConnected = (deviceState1p == DEVICE_OK);
+    bool device2pConnected = (deviceState2p == DEVICE_OK && usePlayer2);
+    bool currentDeviceConnected = usePlayer2 ? device2pConnected : device1pConnected;
+    
+    // 如果设备未连接，显示 "Device Not Connected"
+    if (!currentDeviceConnected)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            SetCursorPosition(0, 5 + i);
+            if (i == 3) // 在中间显示消息
+            {
+                printf("│                           DEVICE NOT CONNECTED                           │");
+            }
+            else if (i == 4) // 在下一行也显示消息
+            {
+                printf("│                           DEVICE NOT CONNECTED                           │");
+            }
+            else
+            {
+                printf("│                                                                          │");
+            }
+        }
+        return;
+    }
+    
+    // 如果正在读取阈值，显示进度
+    bool isReading = usePlayer2 ? thresholdReading2p : thresholdReading1p;
+    bool isComplete = usePlayer2 ? thresholdComplete2p : thresholdComplete1p;
+    int progress = usePlayer2 ? thresholdProgress2p : thresholdProgress1p;
+    
+    // 如果设备已连接但阈值还没有读取完成，显示等待或进度
+    if (currentDeviceConnected && (!isComplete || isReading))
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            SetCursorPosition(0, 5 + i);
+            if (isReading)
+            {
+                // 正在读取，显示进度
+                if (i == 3)
+                {
+                    printf("│                        Threshold Reading (%d/34)                         │", progress);
+                }
+                else if (i == 4)
+                {
+                    int barWidth = 60;
+                    int filled = (progress * barWidth) / 34;
+                    printf("│       [");
+                    for (int j = 0; j < barWidth; j++)
+                    {
+                        if (j < filled)
+                            printf("=");
+                        else
+                            printf(" ");
+                    }
+                    printf("]     │");
+                }
+                else
+                {
+                    printf("│                                                                          │");
+                }
+            }
+            else
+            {
+                // 设备已连接但还没开始读取，显示准备中
+                if (i == 3)
+                {
+                    printf("│                     Preparing to read thresholds...                      │");
+                }
+                else
+                {
+                    printf("│                                                                          │");
+                }
+            }
+        }
+        return;
+    }
+
+    // 正常显示阈值（设备已连接且阈值读取完成）
     // 处理触摸状态到矩阵
     bool touchMatrix[8][8] = {false};
     ProcessTouchStateBytes(usePlayer2 ? p2TouchState : p1TouchState, touchMatrix);
@@ -722,7 +916,9 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[0], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf(" %3d/999  ", threshold_to_display(touchThreshold[18 + i]));
+        char threshold_str[16];
+        format_threshold_display(threshold_str, 18 + i);
+        printf(" %s  ", threshold_str);
 
         // A区域
         if (touchMatrix[i][1])
@@ -731,7 +927,8 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[1], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf(" %3d/999 │ ", threshold_to_display(touchThreshold[i]));
+        format_threshold_display(threshold_str, i);
+        printf(" %s │ ", threshold_str);
 
         // E区域
         if (touchMatrix[i][2])
@@ -740,7 +937,8 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[2], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf(" %3d/999  ", threshold_to_display(touchThreshold[26 + i]));
+        format_threshold_display(threshold_str, 26 + i);
+        printf(" %s  ", threshold_str);
 
         // B区域
         if (touchMatrix[i][3])
@@ -749,7 +947,8 @@ void DisplayThresholds()
         }
         printf("%s%d", labels[3], i + 1);
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        printf(" %3d/999 │", threshold_to_display(touchThreshold[8 + i]));
+        format_threshold_display(threshold_str, 8 + i);
+        printf(" %s │", threshold_str);
 
         // C区域
         if (i < 2) // C1 (Index 16), C2 (Index 17)
@@ -761,7 +960,8 @@ void DisplayThresholds()
             }
             printf("%s%d", labels[4], i + 1);
             SetConsoleTextAttribute(hConsole, defaultAttrs);
-            printf(" %3d/999             │", threshold_to_display(touchThreshold[16 + i]));
+            format_threshold_display(threshold_str, 16 + i);
+            printf(" %s             │", threshold_str);
         }
         else if (i == 6)
         {
@@ -775,8 +975,21 @@ void DisplayThresholds()
         {
             printf("                        │");
         }
+    }
+}
 
-        // 按键部分
+void DisplayInputTest()
+{
+    // 保存当前文本属性
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    WORD defaultAttrs = csbi.wAttributes;
+    
+    // 显示Input Test的8行
+    for (int i = 0; i < 8; i++)
+    {
+        SetCursorPosition(76, 5 + i); 
+        
         if (i < BUTTONS_COUNT)
         {
             uint8_t buttons = usePlayer2 ? player2Buttons : player1Buttons;
@@ -807,7 +1020,7 @@ void DisplayThresholds()
         }
         else
         {
-            printf("   │                      │");
+            printf("│                      │");
         }
     }
 }
@@ -825,22 +1038,85 @@ void PrintTouchPanelTrigger(const char *text, char triggeredRegions[][3], int co
     {
         bool highlighted = false;
 
-        // 查找是否包含任何触发区域的标识符
-        for (int j = 0; j < count; j++)
+        // 首先尝试匹配长度为2的区域标识符（如A1,B2等）
+        if (i + 2 <= len &&
+            ((text[i] == 'A' || text[i] == 'B' || text[i] == 'C' ||
+              text[i] == 'D' || text[i] == 'E') &&
+             text[i + 1] >= '1' && text[i + 1] <= '8'))
         {
-            const char *region = triggeredRegions[j];
-            int regionLen = strlen(region);
+            char region[3] = {text[i], text[i + 1], '\0'};
 
-            if (i + regionLen <= len && strncmp(&text[i], region, regionLen) == 0)
+            // 检查是否是已完成的区域（实时检查）
+            bool isCompletedRegion = false;
+
+            if (autoRemapActive) {
+                // 将区域名称转换为索引以检查是否已完成
+                int regionIndex = -1;
+                char type = region[0];
+                int num = region[1] - '0';
+
+                // 根据区域类型和编号计算索引
+                if (type == 'A') {
+                    regionIndex = num - 1; // A1-A8 -> 0-7
+                } else if (type == 'B') {
+                    regionIndex = num + 7; // B1-B8 -> 8-15
+                } else if (type == 'C') {
+                    regionIndex = num + 15; // C1-C2 -> 16-17
+                } else if (type == 'D') {
+                    regionIndex = num + 17; // D1-D8 -> 18-25
+                } else if (type == 'E') {
+                    regionIndex = num + 25; // E1-E8 -> 26-33
+                }
+
+                // 检查该区域是否已完成
+                if (regionIndex >= 0 && regionIndex < TOUCH_REGIONS) {
+                    isCompletedRegion = autoRemapCompletedRegions[regionIndex];
+                }
+            }
+
+            // 如果是已完成区域，绿色显示
+            if (isCompletedRegion)
             {
-                // 找到触发区域的标识符，高亮显示
-                SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
-                printf("%s", region);
+                SetConsoleTextAttribute(hConsole, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+                printf("%c%c", region[0], region[1]);
                 SetConsoleTextAttribute(hConsole, defaultAttrs);
-
-                i += regionLen;
+                i += 2;
                 highlighted = true;
-                break;
+            }
+            // 否则检查是否是当前触发的区域
+            else
+            {
+                for (int j = 0; j < count && !highlighted; j++)
+                {
+                    if (strcmp(region, triggeredRegions[j]) == 0)
+                    {
+                        SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
+                        printf("%c%c", region[0], region[1]);
+                        SetConsoleTextAttribute(hConsole, defaultAttrs);
+                        i += 2;
+                        highlighted = true;
+                    }
+                }
+            }
+        }
+
+        // 如果没有匹配2字符的区域，再尝试匹配3字符区域（如 D1D, A1A 等）
+        if (!highlighted && i + 3 <= len)
+        {
+            char region[4] = {text[i], text[i + 1], text[i + 2], '\0'};
+
+            for (int j = 0; j < count; j++)
+            {
+                const char *triggerRegion = triggeredRegions[j];
+                if (strlen(triggerRegion) == 3 && strcmp(region, triggerRegion) == 0)
+                {
+                    SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
+                    printf("%s", region);
+                    SetConsoleTextAttribute(hConsole, defaultAttrs);
+                    i += 3;
+                    highlighted = true;
+                    break;
+                }
             }
         }
 
@@ -923,60 +1199,117 @@ void DisplayTouchPanelWindow()
     // 绘制面板，高亮显示触发的区域
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("┌─────────────────────────── Touch Panel Test ───────────────────────────┐", triggeredRegions, count);
+    printf("   ┌───────── Touch Auto Remap ─────────┐");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│          ────────────────────────────────────────────────────          │", triggeredRegions, count);
+    printf("   │   Press [F4] to start Auto Remap   │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│        ╱                          D1                          ╲        │", triggeredRegions, count);
+    printf("   │                                    │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│       ╱              A8         D1D1D1         A1              ╲       │", triggeredRegions, count);
+    printf("   │   Once Auto Remap begins, trigger  │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│      ╱             A8A8                        A1A1             ╲      │", triggeredRegions, count);
+    printf("   │   the regions in clockwise order:  │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│     ╱                           E1E1E1                           ╲     │", triggeredRegions, count);
+    printf("   │         OUT -> MID -> INNER        │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│    ╱            D8                E1                D2            ╲    │", triggeredRegions, count);
+    printf("   │                                    │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│   ╱           D8D8    E8E8                  E2E2    D2D2           ╲   │", triggeredRegions, count);
+    printf("   │   After finishing each ring, wait  │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  ╱                    E8E8     B8    B1     E2E2                    ╲  │", triggeredRegions, count);
+    printf("   │   for that ring to turn green      │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │          A7                B8B8  B1B1                A2          │  │", triggeredRegions, count);
+    printf("   │   before moving on to the next.    │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │        A7A7         B7      B8    B1      B2         A2A2        │  │", triggeredRegions, count);
+    printf("   │                                    │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │                    B7B7                  B2B2                    │  │", triggeredRegions, count);
+    printf("   │   Triggering any other ring or     │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │      D7     E7      B7       C2  C1       B2      E3     D3      │  │", triggeredRegions, count);
+    printf("   │   waiting 15 seconds will end      │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │    D7     E7  E7           C2C2  C1C1           E3  E3     D3    │  │", triggeredRegions, count);
+    printf("   │   the scan.                        │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │      D7     E7      B6       C2  C1       B3      E3     D3      │  │", triggeredRegions, count);
+    printf("   │                                    │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │                    B6B6                  B3B3                    │  │", triggeredRegions, count);
+    printf("   │      The scan start from D1        │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │        A6A6         B6      B5    B4      B3         A3A3        │  │", triggeredRegions, count);
+    printf("   │                                    │");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  │          A6                B5B5  B4B4                A3          │  │", triggeredRegions, count);
+
+    printf("   │   Status: ");
+
+    // 添加状态显示
+    if (autoRemapActive || autoRemapStatus[0] != '\0')
+    {
+        if (autoRemapActive)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_BLUE);
+        }
+        else if (strstr(autoRemapStatus, "SUCCESS") != NULL)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+        }
+        else if (strstr(autoRemapStatus, "FAILED") != NULL ||
+                 strstr(autoRemapStatus, "CANCELED") != NULL)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+        }
+        else
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+        }
+        printf("%-22s", autoRemapStatus);
+        SetConsoleTextAttribute(hConsole, COLOR_DEFAULT);
+    }
+    else
+    {
+        printf("                      ");
+    }
+    printf("   │");
+
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│  ╲                    E6E6     B5    B4     E4E4                   ╱   │", triggeredRegions, count);
+    printf("   │                                    │");
+
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│   ╲           D6D6    E6E6                  E4E4    D4D4          ╱    │", triggeredRegions, count);
+    printf("   └────────────────────────────────────┘");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│    ╲            D6                E5                D4           ╱     │", triggeredRegions, count);
+    printf("                                         ");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│     ╲                           E5E5E5                          ╱      │", triggeredRegions, count);
+    printf("                                         ");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│      ╲            A5A5                          A4A4           ╱       │", triggeredRegions, count);
+    printf("                                         ");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│       ╲             A5          D5D5D5          A4            ╱        │", triggeredRegions, count);
+    printf("                                         ");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│        ╲                          D5                         ╱         │", triggeredRegions, count);
+    printf("                                         ");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("│          ───────────────────────────────────────────────────           │", triggeredRegions, count);
-    SetCursorPosition(0, baseY++);
-    PrintTouchPanelTrigger("│            Trigger Threshold CAN BE Modified At Main View              │", triggeredRegions, count);
+    printf("                                         ");
     SetCursorPosition(0, baseY++);
     PrintTouchPanelTrigger("└────────────────────────────────────────────────────────────────────────┘", triggeredRegions, count);
+    printf("                                         ");
 }
 
 void ProcessTouchStateBytes(uint8_t state[7], bool touchMatrix[8][8])
@@ -1042,8 +1375,8 @@ void UpdateDeviceState()
     static DWORD lastHeartbeatTime = 0;
     DWORD currentTime = GetTickCount();
 
-    // 每500毫秒发送一次心跳
-    if (currentTime - lastHeartbeatTime >= 500)
+    // 每100毫秒发送一次心跳
+    if (heartbeatEnabled && currentTime - lastHeartbeatTime >= 100)
     {
         lastHeartbeatTime = currentTime;
 
@@ -1116,6 +1449,41 @@ void UpdateDeviceState()
     }
 }
 
+// 心跳控制函数
+void PauseHeartbeat()
+{
+    heartbeatEnabled = false;
+    heartbeatPauseStartTime = GetTickCount();
+    Sleep(300); // 等待300ms让心跳包超时
+}
+
+void ResumeHeartbeat()
+{
+    heartbeatEnabled = true;
+    heartbeatPauseStartTime = 0;
+}
+
+void CheckAndStartThresholdReading()
+{
+    // 检查1P设备
+    if (deviceState1p == DEVICE_OK && !thresholdReading1p && !thresholdComplete1p && isFirstConnection1p)
+    {
+        isFirstConnection1p = FALSE;
+        // 开始阈值读取
+        ReadAllThresholds(hPort1, &response1);
+        ReadTouchSheet(hPort1, &response1);
+    }
+    
+    // 检查2P设备
+    if (deviceState2p == DEVICE_OK && !thresholdReading2p && !thresholdComplete2p && isFirstConnection2p)
+    {
+        isFirstConnection2p = FALSE;
+        // 开始阈值读取
+        ReadAllThresholds(hPort2, &response2);
+        ReadTouchSheet(hPort2, &response2);
+    }
+}
+
 void TryConnectDevice(bool isPlayer1)
 {
     HANDLE *phPort = isPlayer1 ? &hPort1 : &hPort2;
@@ -1128,26 +1496,26 @@ void TryConnectDevice(bool isPlayer1)
     // Sleep(50);
 
     // 查找设备COM端口
-    memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
-
-    // 如果没找到设备，就保持WAIT状态，不尝试默认端口
-    if (comPort[0] == 0)
+    char* foundPort = GetSerialPortByVidPid(vid, pid);
+    
+    if (foundPort[0] == 0)
     {
-        *pDeviceState = DEVICE_WAIT;
-        return;
+        if (isPlayer1)
+        {
+            // 对于1P设备，使用默认端口COM11
+            // snprintf(comPort, 12, "\\\\.\\COM11");
+        }
+        else
+        {
+            // 2P设备不使用默认端口，保持WAIT状态
+            *pDeviceState = DEVICE_WAIT;
+            return;
+        }
     }
     else
     {
-        // 统一处理COM端口号
-        int port_num;
-        if (comPort[4] == 0)
-            port_num = (comPort[3] - '0'); // 单位数
-        else if (comPort[5] == 0)
-            port_num = (comPort[3] - '0') * 10 + (comPort[4] - '0'); // 两位数
-        else
-            port_num = (comPort[3] - '0') * 100 + (comPort[4] - '0') * 10 + (comPort[5] - '0'); // 三位数
-
-        snprintf(comPort, 12, "\\\\.\\COM%d", port_num);
+        // 直接使用找到的端口名，添加Windows命名空间前缀
+        snprintf(comPort, 12, "\\\\.\\%s", foundPort);
     }
 
     // 多次尝试连接
@@ -1159,12 +1527,9 @@ void TryConnectDevice(bool isPlayer1)
         {
             *pDeviceState = DEVICE_OK;
             serial_scan_start(*phPort, pResponse);
-
-            if (isPlayer1)
-            {
-                ReadAllThresholds(*phPort, pResponse);
-                ReadTouchSheet(*phPort, pResponse);
-            }
+            
+            // 触发界面刷新显示设备已连接
+            dataChanged = true;
 
             connected = true;
         }
@@ -1173,18 +1538,10 @@ void TryConnectDevice(bool isPlayer1)
             // Sleep(50);
 
             // 每次重试前重新搜索设备
-            memcpy(comPort, GetSerialPortByVidPid(vid, pid), 6);
-            if (comPort[0] != 0)
+            char* foundPortRetry = GetSerialPortByVidPid(vid, pid);
+            if (foundPortRetry[0] != 0)
             {
-                int port_num;
-                if (comPort[4] == 0)
-                    port_num = (comPort[3] - '0');
-                else if (comPort[5] == 0)
-                    port_num = (comPort[3] - '0') * 10 + (comPort[4] - '0');
-                else
-                    port_num = (comPort[3] - '0') * 100 + (comPort[4] - '0') * 10 + (comPort[5] - '0');
-
-                snprintf(comPort, 12, "\\\\.\\COM%d", port_num);
+                snprintf(comPort, 12, "\\\\.\\%s", foundPortRetry);
             }
         }
     }
@@ -1214,31 +1571,26 @@ void ReconnectDevices()
         close_port(&hPort1);
 
         deviceState1p = DEVICE_WAIT;
+        // 重置阈值读取状态
+        thresholdReading1p = FALSE;
+        thresholdComplete1p = FALSE;
+        thresholdProgress1p = 0;
+        isFirstConnection1p = TRUE;
         dataChanged = true;
 
         // Sleep(100);
-        memcpy(comPort1, GetSerialPortByVidPid(Vid, Pid_1p), 6);
+        char* foundPort1p = GetSerialPortByVidPid(Vid, Pid_1p);
 
         // 处理COM端口格式
-        if (comPort1[0] == 0)
+        if (foundPort1p[0] == 0)
         {
-            // 如果无法通过VID/PID找到设备，不再使用默认端口
-            deviceState1p = DEVICE_WAIT;
-            dataChanged = true;
-            return;
+            // 如果无法通过VID/PID找到设备，使用默认端口COM11
+            // snprintf(comPort1, 12, "\\\\.\\COM11");
         }
         else
         {
-            // 统一处理COM端口号，简化代码
-            int port_num;
-            if (comPort1[4] == 0)
-                port_num = (comPort1[3] - '0'); // 单位数
-            else if (comPort1[5] == 0)
-                port_num = (comPort1[3] - '0') * 10 + (comPort1[4] - '0'); // 两位数
-            else
-                port_num = (comPort1[3] - '0') * 100 + (comPort1[4] - '0') * 10 + (comPort1[5] - '0'); // 三位数
-
-            snprintf(comPort1, 12, "\\\\.\\COM%d", port_num);
+            // 直接使用找到的端口名，添加Windows命名空间前缀
+            snprintf(comPort1, 12, "\\\\.\\%s", foundPort1p);
         }
 
         // 尝试多次连接
@@ -1248,10 +1600,8 @@ void ReconnectDevices()
             {
                 deviceState1p = DEVICE_OK;
                 serial_scan_start(hPort1, &response1);
-
-                // 成功连接后读取当前阈值
-                ReadAllThresholds(hPort1, &response1);
-                ReadTouchSheet(hPort1, &response1);
+                
+                // 触发界面刷新显示设备已连接，阈值读取将在主循环中处理
                 dataChanged = true;
                 break;
             }
@@ -1266,27 +1616,27 @@ void ReconnectDevices()
         close_port(&hPort2);
 
         deviceState2p = DEVICE_WAIT;
+        // 重置阈值读取状态
+        thresholdReading2p = FALSE;
+        thresholdComplete2p = FALSE;
+        thresholdProgress2p = 0;
+        isFirstConnection2p = TRUE;
         dataChanged = true;
 
         // Sleep(100);
-        memcpy(comPort2, GetSerialPortByVidPid(Vid, Pid_2p), 6);
+        char* foundPort2p = GetSerialPortByVidPid(Vid, Pid_2p);
 
         // 处理COM端口格式（使用相同的简化逻辑）
-        if (comPort2[0] == 0)
+        if (foundPort2p[0] == 0)
         {
-            strcpy(comPort2, "\\\\.\\COM12");
+            // 不连接到默认端口
+            deviceState2p = DEVICE_WAIT;
+            return;
         }
         else
         {
-            int port_num;
-            if (comPort2[4] == 0)
-                port_num = (comPort2[3] - '0');
-            else if (comPort2[5] == 0)
-                port_num = (comPort2[3] - '0') * 10 + (comPort2[4] - '0');
-            else
-                port_num = (comPort2[3] - '0') * 100 + (comPort2[4] - '0') * 10 + (comPort2[5] - '0');
-
-            snprintf(comPort2, 12, "\\\\.\\COM%d", port_num);
+            // 直接使用找到的端口名，添加Windows命名空间前缀
+            snprintf(comPort2, 12, "\\\\.\\%s", foundPort2p);
         }
 
         // 尝试多次连接
@@ -1296,6 +1646,8 @@ void ReconnectDevices()
             {
                 deviceState2p = DEVICE_OK;
                 serial_scan_start(hPort2, &response2);
+                
+                // 触发界面刷新显示设备已连接，阈值读取将在主循环中处理
                 dataChanged = true;
                 break;
             }
@@ -1332,8 +1684,12 @@ void UpdateTouchData()
                 // 关闭当前端口连接
                 close_port(&hPort1);
 
-                // 更新设备状态为等待状态
+                // 更新设备状态为等待状态并重置阈值读取状态
                 deviceState1p = DEVICE_WAIT;
+                thresholdReading1p = FALSE;
+                thresholdComplete1p = FALSE;
+                thresholdProgress1p = 0;
+                isFirstConnection1p = TRUE;
                 dataChanged = true;
                 break;
             default:
@@ -1361,8 +1717,12 @@ void UpdateTouchData()
             // 关闭当前端口连接
             close_port(&hPort2);
 
-            // 更新设备状态
+            // 更新设备状态并重置阈值读取状态
             deviceState2p = DEVICE_WAIT;
+            thresholdReading2p = FALSE;
+            thresholdComplete2p = FALSE;
+            thresholdProgress2p = 0;
+            isFirstConnection2p = TRUE;
             dataChanged = true;
             break;
         }
@@ -1523,13 +1883,34 @@ void HandleKeyInput()
     case 27: // Esc键
         running = false;
         break;
-    case 'b': // 从固件更新界面返回
+    case 'b':
     case 'B':
         if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
         {
+            // 退出前取消自动模式
+            firmware_auto_mode = FALSE;
             currentWindow = WINDOW_MAIN;
             system("cls");
+            firmwareWindowDrawn = false; // 重置固件窗口绘制标志
             dataChanged = true;
+        }
+        break;
+    case '1': // 开启自动更新等待：检测到CH340即开始写入
+        if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
+        {
+            if (!firmware_auto_mode)
+            {
+                firmware_auto_mode = TRUE;
+                // 显示等待状态
+                SetFirmwareStatusMessage("Waiting");
+                dataChanged = true;
+                // 启动后台等待线程
+                HANDLE h = CreateThread(NULL, 0, AutoUpdateWaitThread, NULL, 0, NULL);
+                if (h)
+                {
+                    CloseHandle(h);
+                }
+            }
         }
         break;
     case 'n': // 切换玩家
@@ -1557,10 +1938,21 @@ void HandleKeyInput()
         }
         break;
     case '\r': // Enter键 - 开始固件更新
-        if (currentWindow == WINDOW_FIRMWARE_UPDATE && firmware_update_ready && !firmware_updating)
+        if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
         {
-            StartFirmwareUpdate();
-            dataChanged = true;
+            // 如果固件未准备好，重新查找固件文件
+            if (!firmware_update_ready || firmware_data == NULL)
+            {
+                firmware_update_ready = FindFirmwareFile();
+                dataChanged = true;
+            }
+            
+            // 如果固件已准备好，开始更新
+            if (firmware_update_ready)
+            {
+                StartFirmwareUpdate();
+                dataChanged = true;
+            }
         }
         break;
     case 0:
@@ -1569,16 +1961,16 @@ void HandleKeyInput()
         switch (key)
         {
         case 59: // F1
-            if (currentWindow != WINDOW_FIRMWARE_UPDATE &&
-                ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK)))
+            if (currentWindow != WINDOW_FIRMWARE_UPDATE /*&&
+                ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))*/)
             {
                 ledButtonsTest = !ledButtonsTest;
                 dataChanged = true;
             }
             break;
         case 60: // F2
-            if (currentWindow != WINDOW_FIRMWARE_UPDATE &&
-                ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK)))
+            if (currentWindow != WINDOW_FIRMWARE_UPDATE /*&&
+                ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))*/)
             {
                 ledControllerTest = !ledControllerTest;
                 dataChanged = true;
@@ -1593,35 +1985,92 @@ void HandleKeyInput()
                 SetFirmwareStatusMessage(NULL);
                 dataChanged = true;
             }
+            else if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
+            {
+                // 返回主界面时取消自动模式
+                firmware_auto_mode = FALSE;
+                currentWindow = WINDOW_MAIN;
+                system("cls");
+                firmwareWindowDrawn = false; // 重置固件窗口绘制标志
+                dataChanged = true;
+            }
+            break;
+        case 62: // F4 - 自动映射
+            if (currentWindow == WINDOW_TOUCHPANEL /*&&
+                ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))*/)
+            {
+                if (!autoRemapActive)
+                {
+                    StartAutoRemap();
+                }
+                else
+                {
+                    StopAutoRemap(false); // 用户手动取消
+                }
+                dataChanged = true;
+            }
             break;
         case 63: // F5
             if (currentWindow == WINDOW_MAIN)
             {
+                // 显示准备消息
+                SetCursorPosition(0, 23);
+                printf("Preparing Threshold Modification...                                        ");
+                
+                /*
                 if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
                 {
+                */
                     ModifyThreshold();
                     dataChanged = true;
+                    /*
                 }
+                    */
+                    
+                // 清除准备消息
+                ClearLine(24);
             }
             break;
         case 64: // F6
             if (currentWindow == WINDOW_MAIN)
             {
+                // 显示准备消息
+                SetCursorPosition(0, 23);
+                printf("Preparing Touch Sheet Remapping...                                        ");
+                
+                /*
                 if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
                 {
+                */
                     RemapTouchSheet();
                     dataChanged = true;
+                    /*
                 }
+                    */
+                    
+                // 清除准备消息
+                ClearLine(24);
             }
             break;
         case 65: // F7 - Modify Latency
             if (currentWindow == WINDOW_MAIN)
             {
+                // 显示准备消息
+                SetCursorPosition(0, 23);
+                printf("Preparing Latency Modification...                                          ");
+                
+                /*
                 if ((usePlayer2 && deviceState2p == DEVICE_OK) || (!usePlayer2 && deviceState1p == DEVICE_OK))
                 {
+                */
                     ModifyLatency();
                     dataChanged = true;
+                    /*
                 }
+                    */
+                    
+                // 清除准备消息
+                ClearLine(23);
             }
             break;
         }
@@ -1654,11 +2103,20 @@ void InitThresholds()
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
         touchThreshold[i] = THRESHOLD_DEFAULT;
+        thresholdReadFailed[i] = false; // 初始化失败标记为false
     }
+    
+    #ifdef DEBUG
+    printf("Thresholds initialized to default value: %d (display: %d/999)\n", 
+           THRESHOLD_DEFAULT, threshold_to_display(THRESHOLD_DEFAULT));
+    #endif
 }
 
 void ModifyThreshold()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
@@ -1920,48 +2378,75 @@ void ModifyThreshold()
 
     // 强制更新显示
     dataChanged = true;
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 uint16_t ReadThreshold(HANDLE hPort, serial_packet_t *response, int index)
 {
     if (index < 0 || index >= TOUCH_REGIONS || hPort == INVALID_HANDLE_VALUE)
     {
-        return THRESHOLD_DEFAULT;
+        if (index >= 0 && index < TOUCH_REGIONS)
+        {
+            thresholdReadFailed[index] = true;
+        }
+        return THRESHOLD_READ_FAILED;
     }
 
-    // 发送读取阈值命令
-    package_init(response);
-    response->syn = 0xff;
-    response->cmd = SERIAL_CMD_READ_MONO_THRESHOLD;
-    response->size = 1;
-    response->channel = (uint8_t)index;
-    serial_writeresp(hPort, response);
+    // 清空串口缓冲区，避免残留数据干扰
+    PurgeComm(hPort, PURGE_RXCLEAR | PURGE_TXCLEAR);
+    Sleep(10);
 
-    const int READ_ITERATIONS = 100;
-    DWORD startTime = GetTickCount();
-    uint8_t cmd;
-
-    while ((GetTickCount() - startTime) < 500) // 500ms超时
+    // 重试机制：最多重试3次
+    for (int retry = 0; retry < 3; retry++)
     {
-        for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
+        // 发送读取阈值命令
+        package_init(response);
+        response->syn = 0xff;
+        response->cmd = SERIAL_CMD_READ_MONO_THRESHOLD;
+        response->size = 1;
+        response->channel = (uint8_t)index;
+        serial_writeresp(hPort, response);
+
+        const int READ_ITERATIONS = 50;
+        DWORD startTime = GetTickCount();
+        uint8_t cmd;
+
+        while ((GetTickCount() - startTime) < 500) // 增加超时时间到500ms
         {
-            package_init(response);
-            cmd = serial_read_cmd(hPort, response);
-            if (cmd == SERIAL_CMD_READ_MONO_THRESHOLD)
+            for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
             {
-                if (response->size >= 3 && response->channel == index)
+                package_init(response);
+                cmd = serial_read_cmd(hPort, response);
+                if (cmd == SERIAL_CMD_READ_MONO_THRESHOLD)
                 {
-                    // 阈值为低字节在前，高字节在后
-                    uint16_t value = (response->threshold[1] << 8) | response->threshold[0];
-                    return value;
+                    if (response->size >= 3 && response->channel == index)
+                    {
+                        // 阈值为低字节在前，高字节在后
+                        uint16_t value = (response->threshold[1] << 8) | response->threshold[0];
+                        // 验证读取到的值是否合理（避免异常值）
+                        if (value <= 16384)
+                        {
+                            thresholdReadFailed[index] = false; // 读取成功
+                            return value;
+                        }
+                    }
                 }
             }
+            Sleep(2);
         }
-        Sleep(1);
+
+        // 重试前等待一段时间
+        if (retry < 2)
+        {
+            Sleep(50);
+        }
     }
 
-    // 超时或未收到正确响应，返回默认值
-    return THRESHOLD_DEFAULT;
+    // 所有重试都失败，标记为读取失败
+    thresholdReadFailed[index] = true;
+    return THRESHOLD_READ_FAILED;
 }
 
 bool SendThreshold(HANDLE hPort, serial_packet_t *response, int index)
@@ -2017,13 +2502,116 @@ void ReadAllThresholds(HANDLE hPort, serial_packet_t *response)
     {
         return;
     }
+    
+    // 确定是哪个设备
+    bool isPlayer1Device = (hPort == hPort1);
+    
+    // 设置读取状态
+    if (isPlayer1Device)
+    {
+        thresholdReading1p = TRUE;
+        thresholdProgress1p = 0;
+        thresholdComplete1p = FALSE;
+    }
+    else
+    {
+        thresholdReading2p = TRUE;
+        thresholdProgress2p = 0;
+        thresholdComplete2p = FALSE;
+    }
+    
+    // 暂停心跳包发送
+    PauseHeartbeat();
+
+    // 添加10秒超时检测
+    DWORD thresholdStartTime = GetTickCount();
+    const DWORD THRESHOLD_TIMEOUT_MS = 10000; // 10秒超时
 
     // 读取所有34个区块的阈值
     for (int i = 0; i < TOUCH_REGIONS; i++)
     {
-        touchThreshold[i] = ReadThreshold(hPort, response, i);
-        Sleep(20);
+        // 检查超时
+        if ((GetTickCount() - thresholdStartTime) > THRESHOLD_TIMEOUT_MS)
+        {
+            // 超时处理
+            printf("[ERROR] Threshold reading timeout (>10s) - Device State Fail\n");
+            
+            // 设置设备状态为失败
+            if (isPlayer1Device)
+            {
+                deviceState1p = DEVICE_FAIL;
+                thresholdReading1p = FALSE;
+                thresholdComplete1p = FALSE;
+            }
+            else
+            {
+                deviceState2p = DEVICE_FAIL;
+                thresholdReading2p = FALSE;
+                thresholdComplete2p = FALSE;
+            }
+            
+            // 恢复心跳包发送
+            ResumeHeartbeat();
+            
+            // 触发界面刷新显示错误状态
+            dataChanged = true;
+            return;
+        }
+        
+        uint16_t readValue = ReadThreshold(hPort, response, i);
+        
+        // 只有读取成功时才更新阈值，失败时保持原值
+        if (readValue != THRESHOLD_READ_FAILED)
+        {
+            touchThreshold[i] = readValue;
+        }
+        // 如果读取失败，thresholdReadFailed[i]已经在ReadThreshold中被设置为true
+        
+        // 更新进度
+        if (isPlayer1Device)
+        {
+            thresholdProgress1p = i + 1;
+        }
+        else
+        {
+            thresholdProgress2p = i + 1;
+        }
+        
+        // 触发界面刷新并立即更新显示
+        dataChanged = true;
+        
+        // 强制刷新阈值显示部分
+        if (currentWindow == WINDOW_MAIN)
+        {
+            DisplayThresholds();
+        }
+        
+        // 适当增加延迟，给设备更多反应时间
+        Sleep(5);
+        
+        // 可选：显示读取进度（调试用）
+        #ifdef DEBUG
+        printf("Reading threshold for region %d: %d\n", i, touchThreshold[i]);
+        #endif
     }
+
+    // 完成阈值读取
+    if (isPlayer1Device)
+    {
+        thresholdReading1p = FALSE;
+        thresholdComplete1p = TRUE;
+    }
+    else
+    {
+        thresholdReading2p = FALSE;
+        thresholdComplete2p = TRUE;
+    }
+    
+    // 触发最终界面刷新
+    dataChanged = true;
+
+    // 暂停心跳包发送
+    ResumeHeartbeat();
 }
 
 bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
@@ -2032,6 +2620,13 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
     {
         return false;
     }
+
+    // 暂停心跳包发送
+    // PauseHeartbeat();
+
+    // 清空串口缓冲区，避免残留数据干扰
+    PurgeComm(hPort, PURGE_RXCLEAR | PURGE_TXCLEAR);
+    Sleep(10); // 给设备一点反应时间
 
     // 发送读取触摸映射表命令
     package_init(response);
@@ -2066,6 +2661,12 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
             {
                 memcpy(touchSheet, response->touch_sheet, TOUCH_REGIONS);
                 return true;
+            }
+            
+            // 如果收到心跳或其他命令，忽略并继续
+            if (cmd == SERIAL_CMD_HEART_BEAT || cmd == SERIAL_CMD_AUTO_SCAN)
+            {
+                continue; // 跳过这些命令，继续等待正确的响应
             }
 
             // 尝试逐字节接收
@@ -2115,16 +2716,21 @@ bool ReadTouchSheet(HANDLE hPort, serial_packet_t *response)
             }
         }
 
-        Sleep(5);
+        Sleep(10); // 增加延迟，给设备更多响应时间
 
-    } while (currentTime - startTime < 2000);
+    } while (currentTime - startTime < 2500); // 增加超时时间到2.5秒
 
     if (headerReceived && bytesReceived >= TOUCH_REGIONS + 3)
     {
         memcpy(touchSheet, &buffer[3], TOUCH_REGIONS);
         return true;
+            
+        // 恢复心跳包发送
+        // ResumeHeartbeat();
     }
 
+    // 恢复心跳包发送
+    ResumeHeartbeat();
     return false; // 超时或未接收到足够数据
 }
 
@@ -2135,6 +2741,10 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
         return false;
     }
 
+    // 清空串口缓冲区
+    PurgeComm(hPort, PURGE_RXCLEAR | PURGE_TXCLEAR);
+    Sleep(50);
+
     // 发送写入触摸映射表命令
     package_init(response);
     response->syn = 0xff;
@@ -2143,11 +2753,11 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
     memcpy(response->touch_sheet, touchSheet, TOUCH_REGIONS);
     serial_writeresp(hPort, response);
 
-    const int READ_ITERATIONS = 100;
+    const int READ_ITERATIONS = 50; // 减少单次循环次数
     DWORD startTime = GetTickCount();
     uint8_t cmd;
 
-    while ((GetTickCount() - startTime) < 1000) // 1000ms超时
+    while ((GetTickCount() - startTime) < 2000) // 增加超时时间到2秒
     {
         for (int iteration = 0; iteration < READ_ITERATIONS; iteration++)
         {
@@ -2158,12 +2768,18 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
                 // 验证响应是否为OK
                 if (response->size >= 1 && response->data[3] == 0x01)
                 {
+                    Sleep(100); // 写入成功后等待设备保存
                     return true;
                 }
                 return false;
             }
+            // 忽略心跳和扫描命令
+            if (cmd == SERIAL_CMD_HEART_BEAT || cmd == SERIAL_CMD_AUTO_SCAN)
+            {
+                continue;
+            }
         }
-        Sleep(1);
+        Sleep(10); // 增加延迟
     }
 
     // 超时或未收到正确响应
@@ -2172,9 +2788,15 @@ bool WriteTouchSheet(HANDLE hPort, serial_packet_t *response)
 
 void RemapTouchSheet()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
+
+    // 首先给设备一点缓冲时间
+    Sleep(200);
 
     // 首先读取当前映射
     bool mappingRead = false;
@@ -2195,7 +2817,7 @@ void RemapTouchSheet()
         SetConsoleTextAttribute(hConsole, COLOR_RED);
         printf("Failed to read current touch mapping! Cannot proceed with remapping.");
         SetConsoleTextAttribute(hConsole, defaultAttrs);
-        Sleep(5000);
+        Sleep(1500);
         ClearLine(23);
         return;
     }
@@ -2222,14 +2844,20 @@ void RemapTouchSheet()
     };
 
     bool duplicate[TOUCH_REGIONS] = {0};
-    for (int x = 0; x < TOUCH_REGIONS; x++)
+    // 检查是否有多个区域映射到同一个通道
+    for (int channel = 0; channel < TOUCH_REGIONS; channel++)
     {
-        for (int y = x + 1; y < TOUCH_REGIONS; y++)
+        int count = 0;
+        for (int region = 0; region < TOUCH_REGIONS; region++)
         {
-            if (touchSheet[x] == touchSheet[y])
+            if (touchSheet[region] == channel)
             {
-                duplicate[x] = duplicate[y] = true;
+                count++;
             }
+        }
+        if (count > 1)
+        {
+            duplicate[channel] = true;
         }
     }
 
@@ -2244,13 +2872,24 @@ void RemapTouchSheet()
     printf("│");
     for (int i = 0; i < TOUCH_REGIONS - 1; i++)
     {
-        if (touchSheet[i] < TOUCH_REGIONS)
+        // 从touchSheet中反向查找哪个区域映射到通道i
+        int mappedRegion = -1;
+        for (int j = 0; j < TOUCH_REGIONS; j++)
+        {
+            if (touchSheet[j] == i)
+            {
+                mappedRegion = j;
+                break;
+            }
+        }
+        
+        if (mappedRegion >= 0 && mappedRegion < TOUCH_REGIONS)
         {
             if (duplicate[i])
             {
                 SetConsoleTextAttribute(hConsole, COLOR_RED);
             }
-            printf("%-2s ", blockLabels[touchSheet[i]]);
+            printf("%-2s ", blockLabels[mappedRegion]);
             if (duplicate[i])
             {
                 SetConsoleTextAttribute(hConsole, defaultAttrs);
@@ -2263,15 +2902,28 @@ void RemapTouchSheet()
     }
     // 单独处理最后一个标签，不带空格
     int lastIndex = TOUCH_REGIONS - 1;
-    if (touchSheet[lastIndex] < TOUCH_REGIONS)
+    int lastMappedRegion = -1;
+    for (int j = 0; j < TOUCH_REGIONS; j++)
     {
-        printf("%-2s", blockLabels[touchSheet[lastIndex]]); // 打印最后一个标签，不加空格
+        if (touchSheet[j] == lastIndex)
+        {
+            lastMappedRegion = j;
+            break;
+        }
+    }
+    if (lastMappedRegion >= 0 && lastMappedRegion < TOUCH_REGIONS)
+    {
+        printf("%-2s", blockLabels[lastMappedRegion]); // 打印最后一个标签，不加空格
+    }
+    else
+    {
+        printf("??");
     }
     printf("│");
     SetCursorPosition(0, promptY + 4);
     printf("└─────────────────────────────────────────────────────────────────────────────────────────────────────┘");
     SetCursorPosition(0, promptY + 5);
-    printf("Please Enter The New Mapping (e.g., A1/5) or press Enter to cancel: ");
+    printf("Please Enter The New Mapping (e.g., A1/5): ");
 
     // 显示光标
     CONSOLE_CURSOR_INFO cursorInfo;
@@ -2355,7 +3007,7 @@ void RemapTouchSheet()
             // 更新映射表并发送到设备
             if (index >= 0 && index < TOUCH_REGIONS)
             {
-                touchSheet[channelValue] = (uint8_t)index;
+                touchSheet[index] = (uint8_t)channelValue;
 
                 bool success1p = false, success2p = false;
 
@@ -2368,6 +3020,12 @@ void RemapTouchSheet()
                     success2p = WriteTouchSheet(hPort2, &response2);
                 }
 
+                // 给设备足够时间保存映射
+                if (success1p || success2p)
+                {
+                    Sleep(300);
+                }
+
                 // 显示成功或失败消息
                 ClearLine(promptY + 5);
                 SetCursorPosition(0, promptY + 5);
@@ -2375,7 +3033,7 @@ void RemapTouchSheet()
                 if (success1p || success2p)
                 {
                     SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-                    printf("Mapping Updated: %c%d = Channel %d 1P:%s 2P:%s",
+                    printf("Mapping Updated: %c%d ← Channel %d 1P:%s 2P:%s",
                            regionType, regionNum, channelValue,
                            success1p ? "OK" : "FAIL",
                            (deviceState2p == DEVICE_OK) ? (success2p ? "OK" : "FAIL") : "N/A");
@@ -2438,6 +3096,9 @@ void RemapTouchSheet()
 
     // 强制更新显示
     dataChanged = true;
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 // 连接Kobato设备并初始化
@@ -2446,24 +3107,16 @@ void ConnectKobato()
     Sleep(200);
 
     // 尝试通过VID/PID获取Kobato设备的COM端口
-    memcpy(comPortKobato, GetSerialPortByVidPid(Vid_Kobato, Pid_Kobato), 6);
-    if (comPortKobato[0] == 0)
+    char* foundPortKobato = GetSerialPortByVidPid(Vid_Kobato, Pid_Kobato);
+    if (foundPortKobato[0] == 0)
     {
         // 如果找不到设备，状态保持为WAIT
         deviceStateKobato = DEVICE_WAIT;
         return;
     }
 
-    // 处理端口号格式（使用简化的统一逻辑）
-    int port_num;
-    if (comPortKobato[4] == 0)
-        port_num = (comPortKobato[3] - '0');
-    else if (comPortKobato[5] == 0)
-        port_num = (comPortKobato[3] - '0') * 10 + (comPortKobato[4] - '0');
-    else
-        port_num = (comPortKobato[3] - '0') * 100 + (comPortKobato[4] - '0') * 10 + (comPortKobato[5] - '0');
-
-    snprintf(comPortKobato, 12, "\\\\.\\COM%d", port_num);
+    // 直接使用找到的端口名，添加Windows命名空间前缀
+    snprintf(comPortKobato, 12, "\\\\.\\%s", foundPortKobato);
 
     // 重试连接几次
     HANDLE tempPort = INVALID_HANDLE_VALUE;
@@ -2689,6 +3342,9 @@ void ReconnectKobato()
 
 void SaveSettings()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     FILE *file = fopen("curva.ini", "wb");
     if (file == NULL)
     {
@@ -2731,16 +3387,26 @@ void SaveSettings()
 
     // 写入触摸映射数据
     fprintf(file, "\n[TouchSheet]\n");
-    for (int i = 0; i < TOUCH_REGIONS; i++)
+    for (int channel = 0; channel < TOUCH_REGIONS; channel++)
     {
-        // 确保映射值在有效范围内
-        if (touchSheet[i] < TOUCH_REGIONS)
+        // 查找映射到此通道的区域
+        int mappedRegion = -1;
+        for (int region = 0; region < TOUCH_REGIONS; region++)
         {
-            fprintf(file, "Channel%d=%s\n", i, blockLabels[touchSheet[i]]);
+            if (touchSheet[region] == channel)
+            {
+                mappedRegion = region;
+                break;
+            }
+        }
+        
+        if (mappedRegion >= 0 && mappedRegion < TOUCH_REGIONS)
+        {
+            fprintf(file, "Channel%d=%s\n", channel, blockLabels[mappedRegion]);
         }
         else
         {
-            fprintf(file, "Channel%d=INVALID\n", i);
+            fprintf(file, "Channel%d=INVALID\n", channel);
         }
     }
 
@@ -2769,10 +3435,16 @@ void SaveSettings()
     {
         ClearLine(i);
     }
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 void LoadSettings()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
+    
     FILE *file = fopen("curva.ini", "rb");
     if (file == NULL)
     {
@@ -2805,6 +3477,8 @@ void LoadSettings()
     bool thresholdsChanged = false;
     bool touchSheetChanged = false;
     bool latencyChanged = false;
+    bool isOldVersion = false; // 标记是否为0.8以前的版本
+    char loadedVersion[32] = ""; // 存储读取的版本号
 
     // 临时存储读取的延迟值
     unsigned int loadedTouchLatency = 0;
@@ -2827,7 +3501,35 @@ void LoadSettings()
         }
 
         // 处理不同区块的数据
-        if (strcmp(section, "Thresholds") == 0)
+        if (strcmp(section, "Curva Settings") == 0)
+        {
+            // 处理版本信息
+            char key[20];
+            char value[32];
+            if (sscanf(line, "%[^=]=%s", key, value) == 2)
+            {
+                if (strcmp(key, "Version") == 0)
+                {
+                    strncpy(loadedVersion, value, sizeof(loadedVersion) - 1);
+                    loadedVersion[sizeof(loadedVersion) - 1] = '\0';
+                    
+                    // 检查是否为0.8以前的版本
+                    // 版本格式：v0.7c, v0.8a 等
+                    if (strlen(loadedVersion) >= 3 && loadedVersion[0] == 'v')
+                    {
+                        float version = 0.0f;
+                        if (sscanf(loadedVersion + 1, "%f", &version) == 1)
+                        {
+                            if (version < 0.8f)
+                            {
+                                isOldVersion = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else if (strcmp(section, "Thresholds") == 0)
         {
             // A1=500 格式的阈值数据（0-999范围）
             char key[10];
@@ -2839,6 +3541,17 @@ void LoadSettings()
                 {
                     if (strcmp(key, blockLabels[i]) == 0 && displayValue <= 999)
                     {
+                        // 如果是0.8以前的版本，将阈值乘以2
+                        if (isOldVersion)
+                        {
+                            displayValue = displayValue * 2;
+                            // 确保不超过999的最大值
+                            if (displayValue > 999)
+                            {
+                                displayValue = 999;
+                            }
+                        }
+                        
                         // 将0-999的显示值转换回0-65535的实际值
                         touchThreshold[i] = display_to_threshold((uint16_t)displayValue);
                         thresholdsChanged = true;
@@ -2861,7 +3574,7 @@ void LoadSettings()
                     {
                         if (strcmp(blockId, blockLabels[i]) == 0)
                         {
-                            touchSheet[channel] = i;
+                            touchSheet[i] = channel;
                             touchSheetChanged = true;
                             break;
                         }
@@ -2892,11 +3605,26 @@ void LoadSettings()
 
     fclose(file);
 
-    // 如果阈值数据已更改，应用到设备
+    // 先应用触摸映射，再应用阈值
     bool thresholdsSuccess = false;
     bool touchSheetSuccess = false;
     bool latencySuccess = false;
 
+    // 如果触摸映射已更改，先应用到设备
+    if (touchSheetChanged)
+    {
+        if (deviceState1p == DEVICE_OK)
+        {
+            touchSheetSuccess = WriteTouchSheet(hPort1, &response1);
+        }
+
+        if (deviceState2p == DEVICE_OK && !touchSheetSuccess)
+        {
+            touchSheetSuccess = WriteTouchSheet(hPort2, &response2);
+        }
+    }
+
+    // 如果阈值数据已更改，再应用到设备
     if (thresholdsChanged)
     {
         if (deviceState1p == DEVICE_OK)
@@ -2919,20 +3647,6 @@ void LoadSettings()
                 Sleep(10);
             }
             thresholdsSuccess = true;
-        }
-    }
-
-    // 如果触摸映射已更改，应用到设备
-    if (touchSheetChanged)
-    {
-        if (deviceState1p == DEVICE_OK)
-        {
-            touchSheetSuccess = WriteTouchSheet(hPort1, &response1);
-        }
-
-        if (deviceState2p == DEVICE_OK && !touchSheetSuccess)
-        {
-            touchSheetSuccess = WriteTouchSheet(hPort2, &response2);
         }
     }
 
@@ -2972,7 +3686,14 @@ void LoadSettings()
             (latencyChanged && latencySuccess))
         {
             SetConsoleTextAttribute(hConsole, COLOR_GREEN);
-            printf("Settings loaded from curva.ini successfully!");
+            if (isOldVersion && thresholdsChanged)
+            {
+                printf("Settings loaded from curva.ini successfully! (Old version %s detected - thresholds doubled)", loadedVersion);
+            }
+            else
+            {
+                printf("Settings loaded from curva.ini successfully!");
+            }
 
             if (deviceState1p == DEVICE_OK)
             {
@@ -3002,6 +3723,9 @@ void LoadSettings()
     {
         ClearLine(i);
     }
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
 }
 
 void ReadLatencySettings(HANDLE hPort, serial_packet_t *response)
@@ -3125,6 +3849,8 @@ bool WriteLatencySettings(HANDLE hPort, serial_packet_t *response, uint8_t type,
 // 修改延迟设置函数
 void ModifyLatency()
 {
+    // 暂停心跳包发送
+    PauseHeartbeat();
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     GetConsoleScreenBufferInfo(hConsole, &csbi);
     WORD defaultAttrs = csbi.wAttributes;
@@ -3254,6 +3980,241 @@ void ModifyLatency()
 
     // 强制更新显示
     dataChanged = true;
+    
+    // 恢复心跳包发送
+    ResumeHeartbeat();
+}
+
+void StartAutoRemap() 
+{
+    // 首先显示正在读取当前映射的状态
+    strcpy(autoRemapStatus, "READING CURRENT MAP");
+    dataChanged = true;
+    
+    // 读取当前映射表
+    bool mappingRead = false;
+
+    if (deviceState1p == DEVICE_OK)
+    {
+        mappingRead = ReadTouchSheet(hPort1, &response1);
+    }
+    else if (deviceState2p == DEVICE_OK)
+    {
+        mappingRead = ReadTouchSheet(hPort2, &response2);
+    }
+
+    if (!mappingRead)
+    {
+        strcpy(autoRemapStatus, "READ MAP FAILED");
+        return;
+    }
+    
+    // 映射读取成功，开始自动映射
+    autoRemapActive = true;
+    autoRemapStage = 0;
+    autoRemapCollected = 0;
+    autoRemapCompletedStages = 0;
+    autoRemapLastTime = GetTickCount();
+    memset(autoRemapRegions, 0xFF, TOUCH_REGIONS); // 初始化为无效值
+    memset(autoRemapCompletedRegions, false, TOUCH_REGIONS); // 清空已完成标记
+    memset(prevTouchMatrix, 0, sizeof(prevTouchMatrix)); // 清空上一帧触摸状态
+    
+    // 设置收集状态
+    strcpy(autoRemapStatus, "COLLECTING");
+    dataChanged = true;
+}
+
+void StopAutoRemap(bool success)
+{
+    autoRemapActive = false;
+
+    if (success)
+    {
+        strcpy(autoRemapStatus, "SUCCESS");
+        CompleteAutoRemap();
+    }
+    else
+    {
+        strcpy(autoRemapStatus, "CANCELED");
+    }
+
+    dataChanged = true;
+}
+
+void UpdateAutoRemap() 
+{
+    if (!autoRemapActive) {
+        return;
+    }
+    
+    DWORD currentTime = GetTickCount();
+    
+    // 检查是否超时（15秒无操作）
+    if (currentTime - autoRemapLastTime > 15000) {
+        StopAutoRemap(false);
+        return;
+    }
+    
+    // 检查是否已经收集了所有区块
+    if (autoRemapCollected >= TOUCH_REGIONS) {
+        // 等待5秒确认无新触发
+        if (currentTime - autoRemapLastTime > 5000) {
+            // 所有区块收集完成
+            StopAutoRemap(true);
+        }
+    }
+}
+
+void ProcessAutoRemapTouch() 
+{
+    if (!autoRemapActive) {
+        return;
+    }
+
+    // 处理当前触摸状态
+    bool currentTouchMatrix[8][8] = {false};
+    ProcessTouchStateBytes(usePlayer2 ? p2TouchState : p1TouchState, currentTouchMatrix);
+
+    // 区块索引映射
+    const struct {
+        int matrixX;
+        int matrixY;
+        int index;
+    } regionMapping[] = {
+        // D1-D8
+        {0, 0, 18}, {0, 1, 19}, {0, 2, 20}, {0, 3, 21}, {0, 4, 22}, {0, 5, 23}, {0, 6, 24}, {0, 7, 25},
+        // A1-A8
+        {1, 0, 0}, {1, 1, 1}, {1, 2, 2}, {1, 3, 3}, {1, 4, 4}, {1, 5, 5}, {1, 6, 6}, {1, 7, 7},
+        // E1-E8
+        {2, 0, 26}, {2, 1, 27}, {2, 2, 28}, {2, 3, 29}, {2, 4, 30}, {2, 5, 31}, {2, 6, 32}, {2, 7, 33},
+        // B1-B8
+        {3, 0, 8}, {3, 1, 9}, {3, 2, 10}, {3, 3, 11}, {3, 4, 12}, {3, 5, 13}, {3, 6, 14}, {3, 7, 15},
+        // C1-C2
+        {4, 0, 16}, {4, 1, 17}
+    };
+
+    // 找到新触发的区块（当前触发但上一帧未触发的区块）
+    for (int i = 0; i < sizeof(regionMapping) / sizeof(regionMapping[0]); i++) {
+        int x = regionMapping[i].matrixX;
+        int y = regionMapping[i].matrixY;
+        int regionIndex = regionMapping[i].index;
+
+        // 检查是否是新触发的区块（当前触发且上一帧未触发）
+        bool isNewTouch = currentTouchMatrix[y][x] && !prevTouchMatrix[y][x];
+        
+        if (isNewTouch) {
+            // 检查此区块是否已被记录
+            bool alreadyRecorded = false;
+            for (int j = 0; j < autoRemapCollected; j++) {
+                if (autoRemapRegions[j] == regionIndex) {
+                    alreadyRecorded = true;
+                    break;
+                }
+            }
+
+            // 如果是新区块，记录它
+            if (!alreadyRecorded) {
+                // 记录区块到下一个可用位置
+                autoRemapRegions[autoRemapCollected] = regionIndex;
+                autoRemapCompletedRegions[regionIndex] = true; // 标记为已完成
+                autoRemapCollected++;
+                autoRemapLastTime = GetTickCount();
+                dataChanged = true;
+                
+                // 实时更新进度状态
+                if (autoRemapCollected >= 34) {
+                    // 所有区块都已收集完成
+                    autoRemapCompletedStages = 4;
+                    strcpy(autoRemapStatus, "ALL REGIONS COLLECTED");
+                    StopAutoRemap(true);
+                } else {
+                    // 更新收集进度状态
+                    snprintf(autoRemapStatus, sizeof(autoRemapStatus), "COLLECTED: %d/34", autoRemapCollected);
+                }
+            }
+        }
+    }
+
+    // 更新上一帧的触摸状态
+    memcpy(prevTouchMatrix, currentTouchMatrix, sizeof(prevTouchMatrix));
+}
+
+void CompleteAutoRemap()
+{
+    // 当前映射已在StartAutoRemap中读取，直接进行映射处理
+    
+    // 创建标准区块索引数组
+    const uint8_t standardOrder[TOUCH_REGIONS] = {
+        // D1,A1,D2,A2,D3,A3,D4,A4,D5,A5,D6,A6,D7,A7,D8,A8,
+        18, 0, 19, 1, 20, 2, 21, 3, 22, 4, 23, 5, 24, 6, 25, 7,
+        // E1,E2,E3,E4,E5,E6,E7,E8,
+        26, 27, 28, 29, 30, 31, 32, 33,
+        // B1,B2,B3,B4,B5,B6,B7,B8,
+        8, 9, 10, 11, 12, 13, 14, 15,
+        // C1,C2
+        16, 17
+    };
+
+    // 创建新的映射表
+    uint8_t newTouchSheet[TOUCH_REGIONS];
+    memset(newTouchSheet, 0xFF, TOUCH_REGIONS); // 初始化为无效值
+
+    // 对于每个收集到的区块，找到它在标准顺序中对应的区块，然后创建映射
+    for (int i = 0; i < TOUCH_REGIONS; i++)
+    {
+        if (i < autoRemapCollected && autoRemapRegions[i] != 0xFF)
+        {
+            // 获取此位置收集到的物理通道索引
+            uint8_t collectedChannel = autoRemapRegions[i];
+            
+            // 找到标准顺序中的区域索引
+            uint8_t standardRegion = (i < TOUCH_REGIONS) ? standardOrder[i] : 0xFF;
+            
+            if (standardRegion != 0xFF)
+            {
+                // 创建映射: 区域standardRegion -> 物理通道collectedChannel
+                // 这意味着当系统需要standardRegion区域触摸时，应该检查collectedChannel通道
+                newTouchSheet[standardRegion] = collectedChannel;
+            }
+        }
+    }
+
+    // 复制新映射表到全局变量
+    memcpy(touchSheet, newTouchSheet, TOUCH_REGIONS);
+
+    // 写入设备
+    bool success1p = false, success2p = false;
+
+    if (deviceState1p == DEVICE_OK)
+    {
+        success1p = WriteTouchSheet(hPort1, &response1);
+    }
+    if (deviceState2p == DEVICE_OK)
+    {
+        success2p = WriteTouchSheet(hPort2, &response2);
+    }
+
+    // 更新状态
+    if (success1p || success2p)
+    {
+        strcpy(autoRemapStatus, "SUCCESS");
+
+        // 发送心跳以确保连接保持
+        if (success1p && deviceState1p == DEVICE_OK)
+        {
+            serial_heart_beat(hPort1, &response1);
+        }
+        if (success2p && deviceState2p == DEVICE_OK)
+        {
+            serial_heart_beat(hPort2, &response2);
+        }
+    }
+    else
+    {
+        strcpy(autoRemapStatus, "WRITE FAILED");
+    }
+
+    dataChanged = true;
 }
 
 /*
@@ -3326,8 +4287,8 @@ static void set_rts(HANDLE h, bool hi)
 /* ----- 进入/退出启动加载程序 ----- */
 static void enter_boot(HANDLE h)
 {
-    set_dtr(h, true); /* BOOT0 = 1 */
-    set_rts(h, true); /* nRST = 0 */
+    set_dtr(h, false); /* BOOT0 = 1 */
+    set_rts(h, true);  /* nRST = 0 */
     Sleep(50);
     set_rts(h, false); /* 释放复位 */
     Sleep(100);
@@ -3335,8 +4296,8 @@ static void enter_boot(HANDLE h)
 
 static void exit_boot(HANDLE h)
 {
-    set_dtr(h, false); /* BOOT0 = 0 */
-    set_rts(h, true);  /* nRST = 0 */
+    set_dtr(h, true); /* BOOT0 = 0 */
+    set_rts(h, true); /* nRST = 0 */
     Sleep(50);
     set_rts(h, false); /* nRST = 1 */
     Sleep(100);
@@ -3442,7 +4403,7 @@ static bool bl_write_block(HANDLE h, uint32_t addr, const unsigned char *buf, si
 
 static bool is_ch340(DWORD vid, DWORD pid)
 {
-    return vid == VID_CH340 && (pid == PID_CH340_G || pid == PID_CH340_X);
+    return vid == VID_CH340 && pid == PID_CH340;
 }
 
 /* ----- 查找和打开CH340设备 ----- */
@@ -3497,7 +4458,7 @@ DWORD WINAPI FindCH340Thread(LPVOID lpParam)
         if (sscanf(hwid, "USB\\VID_%4lx&PID_%4lx", &vid, &pid) != 2)
             continue;
 
-        if (vid == VID_CH340 && (pid == PID_CH340_G || pid == PID_CH340_X))
+        if (vid == VID_CH340 && pid == PID_CH340)
         {
             // 找到一个CH340设备
             ch340_count++;
@@ -3611,7 +4572,7 @@ static bool open_boot_port(const char *name)
     dcb.ByteSize = 8;
     dcb.StopBits = ONESTOPBIT;
     dcb.fParity = TRUE;
-    dcb.fDtrControl = DTR_CONTROL_DISABLE;
+    dcb.fDtrControl = DTR_CONTROL_ENABLE;
     dcb.fRtsControl = RTS_CONTROL_DISABLE;
     dcb.fOutxCtsFlow = dcb.fOutxDsrFlow = dcb.fOutX = dcb.fInX = FALSE;
     if (!SetCommState(hBootPort, &dcb))
@@ -3640,11 +4601,18 @@ static void cleanup_firmware()
         free(firmware_data);
         firmware_data = NULL;
     }
+    firmware_data_len = 0;
+    
     if (hBootPort != INVALID_HANDLE_VALUE)
     {
         CloseHandle(hBootPort);
         hBootPort = INVALID_HANDLE_VALUE;
     }
+    
+    // 重置固件更新相关状态
+    firmware_update_ready = false;
+    firmware_updating = false;
+    firmware_update_progress = 0;
 }
 
 /* ----- 查找并加载固件文件 ----- */
@@ -3813,6 +4781,47 @@ void SetFirmwareStatusMessage(const char *msg)
     dataChanged = true;
 }
 
+// 自动更新等待线程：等待检测到CH340后直接启动更新
+DWORD WINAPI AutoUpdateWaitThread(LPVOID lpParam)
+{
+    // 持续等待CH340“插入”事件：由不存在 -> 存在 的边沿触发
+    BOOL was_present = FALSE;
+    while (firmware_auto_mode && currentWindow == WINDOW_FIRMWARE_UPDATE)
+    {
+        char port[32] = {0};
+        BOOL present = find_ch340_port(port, sizeof(port)) ? TRUE : FALSE;
+
+        // 边沿触发：仅在上一轮不存在，本轮出现，且当前未在更新时触发
+        if (!was_present && present && !firmware_updating)
+        {
+            if (!firmware_update_ready || firmware_data == NULL)
+            {
+                firmware_update_ready = FindFirmwareFile();
+            }
+
+            if (firmware_update_ready)
+            {
+                StartFirmwareUpdate();
+            }
+            // 若未找到固件，则继续保持等待
+        }
+
+        was_present = present;
+
+        // 轮询间隔
+        for (int i = 0; i < 10; ++i)
+        {
+            if (!firmware_auto_mode || currentWindow != WINDOW_FIRMWARE_UPDATE)
+            {
+                break;
+            }
+            Sleep(50);
+        }
+    }
+
+    return 0;
+}
+
 // 固件更新线程
 DWORD WINAPI UpdateFirmwareThread(LPVOID lpParam)
 {
@@ -3945,6 +4954,11 @@ DWORD WINAPI UpdateFirmwareThread(LPVOID lpParam)
     // 清理
     cleanup_firmware();
     firmware_updating = false;
+    // 如果仍处于自动模式，则继续等待下一次插入
+    if (firmware_auto_mode && currentWindow == WINDOW_FIRMWARE_UPDATE)
+    {
+        SetFirmwareStatusMessage("Waiting");
+    }
     return 0;
 }
 
@@ -3985,12 +4999,11 @@ void PrepareForFirmwareUpdate()
         hBootPort = INVALID_HANDLE_VALUE;
     }
 
-    // 清理固件数据
+    // 清理固件数据（这会重置所有相关状态）
     cleanup_firmware();
-
-    // 重置状态变量
-    firmware_updating = false;
-    firmware_update_progress = 0;
+    
+    // 清理状态消息
+    SetFirmwareStatusMessage(NULL);
 }
 
 void DisplayFirmwareUpdateWindow()
@@ -4007,7 +5020,7 @@ void DisplayFirmwareUpdateWindow()
 
     // 显示固件更新界面
     SetCursorPosition(0, 4);
-    printf("┌──────────────────────────── Curva Firmware Update ────────────────────────────┐");
+    printf("┌────────────────────────── Curva Firmware AutoUpdater ─────────────────────────┐");
 
     SetCursorPosition(0, 5);
     printf("│                                                                               │");
@@ -4019,9 +5032,16 @@ void DisplayFirmwareUpdateWindow()
     printf("│  Firmware Path: %-57.57S     │", firmware_path[0] ? firmware_path : L"No firmware file found");
 
     SetCursorPosition(0, 8);
-    printf("│                                                                               │");
+    printf("│  To use AutoUpdater, verify that the HW version is at least ");
+    SetConsoleTextAttribute(hConsole, COLOR_BLUE);
+    printf("v1.250515G");
+    SetConsoleTextAttribute(hConsole, defaultAttrs);
+    printf(".       │");
 
     SetCursorPosition(0, 9);
+    printf("│                                                                               │");
+
+    SetCursorPosition(0, 10);
     if (firmware_update_ready)
     {
         printf("│  Ready to update. Press Enter to start firmware update                        │");
@@ -4035,13 +5055,13 @@ void DisplayFirmwareUpdateWindow()
         printf("│");
     }
 
-    SetCursorPosition(0, 10);
+    SetCursorPosition(0, 11);
     printf("│                                                                               │");
 
     // 显示更新状态和进度条
     if (firmware_updating)
     {
-        SetCursorPosition(0, 11);
+        SetCursorPosition(0, 12);
         printf("│  Updating: [");
 
         // 绘制进度条 (50个字符宽度)
@@ -4062,10 +5082,10 @@ void DisplayFirmwareUpdateWindow()
 
         printf("] %3d%%          │", firmware_update_progress);
 
-        SetCursorPosition(0, 12);
+        SetCursorPosition(0, 13);
         printf("│                                                                               │");
 
-        SetCursorPosition(0, 13);
+        SetCursorPosition(0, 14);
         if (firmware_status_message)
         {
             printf("│  Status: %-69s│", firmware_status_message);
@@ -4077,10 +5097,10 @@ void DisplayFirmwareUpdateWindow()
     }
     else if (firmware_status_message)
     {
-        SetCursorPosition(0, 11);
+        SetCursorPosition(0, 12);
         printf("│                                                                               │");
 
-        SetCursorPosition(0, 12);
+        SetCursorPosition(0, 13);
         printf("│  Status: ");
 
         if (strstr(firmware_status_message, "Error") != NULL)
@@ -4102,37 +5122,103 @@ void DisplayFirmwareUpdateWindow()
         SetConsoleTextAttribute(hConsole, defaultAttrs);
         printf("│");
 
-        SetCursorPosition(0, 13);
+        SetCursorPosition(0, 14);
         printf("│                                                                               │");
     }
     else
     {
-        SetCursorPosition(0, 11);
-        printf("│                                                                               │");
-
         SetCursorPosition(0, 12);
         printf("│                                                                               │");
 
         SetCursorPosition(0, 13);
         printf("│                                                                               │");
+
+        SetCursorPosition(0, 14);
+        printf("│                                                                               │");
     }
 
     // 底部说明
-    SetCursorPosition(0, 14);
-    printf("│                                                                               │");
-
     SetCursorPosition(0, 15);
-    printf("│  ※ DO NOT disconnect power or USB connection during update                    │");
+    printf("│                                                                               │");
 
     SetCursorPosition(0, 16);
-    printf("│  ※ Device will automatically restart after update completes                   │");
+    printf("│  ※ DO NOT disconnect power or USB connection during update                    │");
 
     SetCursorPosition(0, 17);
-    printf("│                                                                               │");
+    printf("│  ※ Device will automatically restart after update completes                   │");
 
     SetCursorPosition(0, 18);
-    printf("│  Press [B] to return to Main View                                             │");
+    printf("│                                                                               │");
 
     SetCursorPosition(0, 19);
+    printf("│  Press [F3] to return to Main View                                            │");
+
+    SetCursorPosition(0, 20);
     printf("└───────────────────────────────────────────────────────────────────────────────┘");
+}
+
+void UpdateFirmwareProgressOnly()
+{
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    WORD defaultAttrs = csbi.wAttributes;
+
+    // 只更新进度条和状态部分
+    if (firmware_updating)
+    {
+        // 更新进度条
+        SetCursorPosition(0, 12);
+        printf("│  Updating: [");
+
+        // 绘制进度条 (50个字符宽度)
+        const int bar_width = 50;
+        int filled = (firmware_update_progress * bar_width) / 100;
+
+        for (int i = 0; i < bar_width; i++)
+        {
+            if (i < filled)
+            {
+                printf("#");
+            }
+            else
+            {
+                printf(" ");
+            }
+        }
+
+        printf("] %3d%%          │", firmware_update_progress);
+    }
+
+    // 更新状态消息行
+    SetCursorPosition(0, 13);
+    printf("│                                                                               │");
+
+    SetCursorPosition(0, 14);
+    if (firmware_status_message)
+    {
+        printf("│  Status: ");
+
+        if (strstr(firmware_status_message, "Error") != NULL)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_RED);
+            printf("%-69s", firmware_status_message);
+        }
+        else if (strstr(firmware_status_message, "successful") != NULL ||
+                 strstr(firmware_status_message, "Update success") != NULL)
+        {
+            SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+            printf("%-69s", firmware_status_message);
+        }
+        else
+        {
+            printf("%-69s", firmware_status_message);
+        }
+
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        printf("│");
+    }
+    else
+    {
+        printf("│                                                                               │");
+    }
 }
