@@ -100,14 +100,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install AWS CLI
-        if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
-        shell: powershell
-        run: |
-          choco install awscli -y
-          aws --version
-
-      - name: Upload DLL to Cloudflare R2 (tag subdir + latest.json)
+      - name: Upload DLL to Cloudflare R2
         if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
         shell: powershell
         working-directory: chuniio

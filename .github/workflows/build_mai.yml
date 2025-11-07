@@ -78,7 +78,7 @@ jobs:
 
       - name: Build Mai Test Program
         run: |
-          gcc -m64 test.c serial.c dprintf.c dfu.c -lsetupapi -luser32 -lkernel32 -Wl,-Bstatic $(pkg-config --cflags --libs libusb-1.0) -Wl,-Bdynamic -o curva_test.exe
+          gcc test.c serial.c dprintf.c dfu.c -lsetupapi -luser32 -lkernel32 -lwinhttp -Wl,-Bstatic $(pkg-config --cflags --libs libusb-1.0) -Wl,-Bdynamic -o test.exe
 
       - name: Upload DLL Artifact
         uses: actions/upload-artifact@v4
@@ -102,14 +102,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install AWS CLI
-        if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
-        shell: powershell
-        run: |
-          choco install awscli -y
-          aws --version
-
-      - name: Upload DLL to Cloudflare R2 (tag subdir + latest.json)
+      - name: Upload DLL to Cloudflare R2
         if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
         shell: powershell
         working-directory: mai2io
