@@ -12,6 +12,8 @@
 #include <wchar.h>
 #include <setupapi.h>
 #include <devguid.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
 
 /* ---------- 项目头文件 ---------- */
 #include "serial.h"
@@ -23,7 +25,7 @@
 
 /* ---------- 常量定义 ---------- */
 // 版本号
-const char *VERSION = "v0.9";
+const char *VERSION = "v0.9a";
 
 // 触摸和按键相关常量
 #define TOUCH_REGIONS 34        // 触摸区域总数
@@ -219,6 +221,13 @@ static unsigned int firmware_data_len = 0;
 static volatile BOOL firmware_auto_mode = FALSE;   // 按下'1'后进入自动等待模式
 static HANDLE hAutoUpdateThread = NULL;            // 自动更新线程句柄（仅用于调试，可不持有）
 
+// CDN 状态
+bool cdn_status_ok = false;                  // CDN是否可访问
+bool cdn_checking = false;                   // CDN是否正在检查中
+char latest_version[32] = "Unknown";         // 最新固件版本
+#define CDN_URL "https://cdn.ruminasu.org/public/firmwares/affine/mai2/latest.json"
+#define CDN_BASE_URL "https://cdn.ruminasu.org"
+
 // 自动映射相关变量
 bool autoRemapActive = false;            // 自动映射是否激活
 int autoRemapStage = 0;                  // 当前收集阶段（0-3）
@@ -299,6 +308,10 @@ bool FindFirmwareFile(void);
 void PrepareForFirmwareUpdate();
 void SetFirmwareStatusMessage(const char *msg);
 DWORD WINAPI AutoUpdateWaitThread(LPVOID lpParam);
+bool DownloadLatestJSON(void);
+bool DownloadFirmwareFromCDN(const char *cdn_path);
+bool CheckCDNStatus(void);
+DWORD WINAPI CDNCheckThread(LPVOID lpParam);
 
 // 阈值转换辅助函数
 static inline uint16_t threshold_to_display(uint16_t threshold)
@@ -313,6 +326,461 @@ static inline uint16_t threshold_to_display(uint16_t threshold)
     uint16_t result = (uint16_t)((threshold * 999) / 16384) + 1;
     // 自动加1补偿整数除法的精度损失，但不超过999
     return (result < 999) ? (result + 1) : 999;
+}
+
+
+// 检查CDN状态
+bool CheckCDNStatus(void)
+{
+    HINTERNET hSession = NULL;
+    HINTERNET hConnect = NULL;
+    HINTERNET hRequest = NULL;
+    bool result = false;
+
+    // 初始化WinHTTP会话
+    hSession = WinHttpOpen(L"Curva Test Tools",
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME,
+                          WINHTTP_NO_PROXY_BYPASS,
+                          0);
+    if (!hSession)
+        goto cleanup;
+
+    // 连接到服务器
+    hConnect = WinHttpConnect(hSession,
+                             L"cdn.ruminasu.org",
+                             INTERNET_DEFAULT_HTTPS_PORT,
+                             0);
+    if (!hConnect)
+        goto cleanup;
+
+    // 打开请求（HEAD请求更快）
+    hRequest = WinHttpOpenRequest(hConnect,
+                                 L"HEAD",
+                                 L"/public/firmwares/affine/mai2/latest.json",
+                                 NULL,
+                                 WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 WINHTTP_FLAG_SECURE);
+    if (!hRequest)
+        goto cleanup;
+
+    // 发送请求
+    if (!WinHttpSendRequest(hRequest,
+                           WINHTTP_NO_ADDITIONAL_HEADERS,
+                           0,
+                           WINHTTP_NO_REQUEST_DATA,
+                           0,
+                           0,
+                           0))
+        goto cleanup;
+
+    // 接收响应
+    if (!WinHttpReceiveResponse(hRequest, NULL))
+        goto cleanup;
+
+    // 检查状态码
+    DWORD statusCode = 0;
+    DWORD size = sizeof(DWORD);
+    if (WinHttpQueryHeaders(hRequest,
+                           WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                           NULL,
+                           &statusCode,
+                           &size,
+                           NULL))
+    {
+        result = (statusCode == 200);
+    }
+
+cleanup:
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnect) WinHttpCloseHandle(hConnect);
+    if (hSession) WinHttpCloseHandle(hSession);
+
+    return result;
+}
+
+// CDN检查后台线程
+DWORD WINAPI CDNCheckThread(LPVOID lpParam)
+{
+    cdn_checking = true;
+    dataChanged = true;
+    
+    // 检查CDN状态
+    cdn_status_ok = CheckCDNStatus();
+    
+    if (cdn_status_ok)
+    {
+        SetFirmwareStatusMessage("Getting firmware info from CDN...");
+        dataChanged = true;
+        
+        // 从CDN下载latest.json获取版本信息
+        if (DownloadLatestJSON())
+        {
+            firmware_update_ready = true;
+            SetFirmwareStatusMessage("Ready to download and update");
+        }
+        else
+        {
+            // 在线获取失败，fallback到本地
+            cdn_status_ok = false;
+            firmware_update_ready = FindFirmwareFile();
+            SetFirmwareStatusMessage(firmware_update_ready ? "Using local firmware" : NULL);
+        }
+    }
+    else
+    {
+        // CDN不可用，使用本地固件
+        firmware_update_ready = FindFirmwareFile();
+        SetFirmwareStatusMessage(firmware_update_ready ? "Using local firmware" : NULL);
+    }
+    
+    cdn_checking = false;
+    
+    // 强制刷新整个固件更新窗口以显示最终状态
+    firmwareWindowDrawn = false;
+    dataChanged = true;
+    
+    return 0;
+}
+
+// 简单的JSON解析辅助函数
+static const char* find_json_string(const char* json, const char* key, char* out_buffer, size_t buffer_size)
+{
+    if (!json || !key || !out_buffer || buffer_size == 0)
+        return NULL;
+
+    // 查找键
+    char search_key[128];
+    _snprintf_s(search_key, sizeof(search_key), _TRUNCATE, "\"%s\"", key);
+    const char* key_pos = strstr(json, search_key);
+    if (!key_pos)
+        return NULL;
+
+    // 查找值的开始（跳过 "key":）
+    const char* value_start = strchr(key_pos + strlen(search_key), '"');
+    if (!value_start)
+        return NULL;
+    value_start++; // 跳过第一个引号
+
+    // 查找值的结束
+    const char* value_end = strchr(value_start, '"');
+    if (!value_end)
+        return NULL;
+
+    // 复制值
+    size_t length = value_end - value_start;
+    if (length >= buffer_size)
+        length = buffer_size - 1;
+
+    strncpy_s(out_buffer, buffer_size, value_start, length);
+    out_buffer[length] = '\0';
+
+    return out_buffer;
+}
+
+// 下载latest.json并解析
+bool DownloadLatestJSON(void)
+{
+    HINTERNET hSession = NULL;
+    HINTERNET hConnect = NULL;
+    HINTERNET hRequest = NULL;
+    bool result = false;
+    char* json_data = NULL;
+    DWORD total_downloaded = 0;
+
+    // 初始化WinHTTP会话
+    hSession = WinHttpOpen(L"Curva Test Tools",
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME,
+                          WINHTTP_NO_PROXY_BYPASS,
+                          0);
+    if (!hSession)
+        goto cleanup;
+
+    // 连接到服务器
+    hConnect = WinHttpConnect(hSession,
+                             L"cdn.ruminasu.org",
+                             INTERNET_DEFAULT_HTTPS_PORT,
+                             0);
+    if (!hConnect)
+        goto cleanup;
+
+    // 打开请求
+    hRequest = WinHttpOpenRequest(hConnect,
+                                 L"GET",
+                                 L"/public/firmwares/affine/mai2/latest.json",
+                                 NULL,
+                                 WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 WINHTTP_FLAG_SECURE);
+    if (!hRequest)
+        goto cleanup;
+
+    // 发送请求
+    if (!WinHttpSendRequest(hRequest,
+                           WINHTTP_NO_ADDITIONAL_HEADERS,
+                           0,
+                           WINHTTP_NO_REQUEST_DATA,
+                           0,
+                           0,
+                           0))
+        goto cleanup;
+
+    // 接收响应
+    if (!WinHttpReceiveResponse(hRequest, NULL))
+        goto cleanup;
+
+    // 检查状态码
+    DWORD statusCode = 0;
+    DWORD size = sizeof(DWORD);
+    if (!WinHttpQueryHeaders(hRequest,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            NULL,
+                            &statusCode,
+                            &size,
+                            NULL) || statusCode != 200)
+        goto cleanup;
+
+    // 分配缓冲区（JSON文件应该很小）
+    json_data = (char*)malloc(8192);
+    if (!json_data)
+        goto cleanup;
+
+    memset(json_data, 0, 8192);
+
+    // 读取数据
+    DWORD bytes_available = 0;
+    DWORD bytes_read = 0;
+
+    while (WinHttpQueryDataAvailable(hRequest, &bytes_available) && bytes_available > 0)
+    {
+        if (total_downloaded + bytes_available >= 8192)
+            break;
+
+        if (WinHttpReadData(hRequest, json_data + total_downloaded, bytes_available, &bytes_read))
+        {
+            total_downloaded += bytes_read;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (total_downloaded > 0)
+    {
+        json_data[total_downloaded] = '\0';
+
+        // 解析JSON
+        char version_str[32] = {0};
+        char file_str[128] = {0};
+        char path_str[256] = {0};
+
+        if (find_json_string(json_data, "version", version_str, sizeof(version_str)) &&
+            find_json_string(json_data, "file", file_str, sizeof(file_str)) &&
+            find_json_string(json_data, "path", path_str, sizeof(path_str)))
+        {
+            // 从文件名中提取版本号 (例如: Curva_G431_2511061405.bin -> v1.2511061405)
+            const char* filename_start = strrchr(file_str, '_');
+            if (filename_start != NULL)
+            {
+                filename_start++; // 跳过下划线
+                const char* dot = strrchr(filename_start, '.');
+                if (dot != NULL)
+                {
+                    // 提取版本号部分
+                    size_t version_len = dot - filename_start;
+                    if (version_len > 0 && version_len < 20)
+                    {
+                        char extracted_version[32];
+                        strncpy_s(extracted_version, sizeof(extracted_version), filename_start, version_len);
+                        extracted_version[version_len] = '\0';
+                        
+                        // 格式化为 v1.xxxxxxxxxx
+                        _snprintf_s(latest_version, sizeof(latest_version), _TRUNCATE, "v1.%s", extracted_version);
+                    }
+                }
+            }
+            
+            // 如果版本号提取失败，使用JSON中的version字段作为备用
+            if (latest_version[0] == '\0')
+            {
+                strncpy_s(latest_version, sizeof(latest_version), version_str, _TRUNCATE);
+            }
+            
+            // 构建完整URL并保存到firmware_path（用于后续下载）
+            char full_url[512];
+            _snprintf_s(full_url, sizeof(full_url), _TRUNCATE, "%s%s", CDN_BASE_URL, path_str);
+            
+            // 转换为宽字符
+            MultiByteToWideChar(CP_UTF8, 0, full_url, -1, firmware_path, MAX_PATH);
+            
+            // 设置版本显示
+            MultiByteToWideChar(CP_UTF8, 0, latest_version, -1, firmware_version, 32);
+
+            result = true;
+        }
+    }
+
+cleanup:
+    if (json_data) free(json_data);
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnect) WinHttpCloseHandle(hConnect);
+    if (hSession) WinHttpCloseHandle(hSession);
+
+    return result;
+}
+
+// 从CDN下载固件文件
+bool DownloadFirmwareFromCDN(const char *cdn_path)
+{
+    HINTERNET hSession = NULL;
+    HINTERNET hConnect = NULL;
+    HINTERNET hRequest = NULL;
+    bool result = false;
+    
+    // 解析URL
+    wchar_t wide_url[512];
+    MultiByteToWideChar(CP_UTF8, 0, cdn_path, -1, wide_url, 512);
+
+    URL_COMPONENTSW urlComp;
+    ZeroMemory(&urlComp, sizeof(urlComp));
+    urlComp.dwStructSize = sizeof(urlComp);
+
+    wchar_t hostname[256] = {0};
+    wchar_t urlpath[256] = {0};
+    
+    urlComp.lpszHostName = hostname;
+    urlComp.dwHostNameLength = 256;
+    urlComp.lpszUrlPath = urlpath;
+    urlComp.dwUrlPathLength = 256;
+
+    if (!WinHttpCrackUrl(wide_url, 0, 0, &urlComp))
+        goto cleanup;
+
+    // 初始化WinHTTP会话
+    hSession = WinHttpOpen(L"Curva Test Tools",
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME,
+                          WINHTTP_NO_PROXY_BYPASS,
+                          0);
+    if (!hSession)
+        goto cleanup;
+
+    // 连接到服务器
+    hConnect = WinHttpConnect(hSession,
+                             hostname,
+                             urlComp.nPort,
+                             0);
+    if (!hConnect)
+        goto cleanup;
+
+    // 打开请求
+    hRequest = WinHttpOpenRequest(hConnect,
+                                 L"GET",
+                                 urlpath,
+                                 NULL,
+                                 WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
+    if (!hRequest)
+        goto cleanup;
+
+    // 发送请求
+    if (!WinHttpSendRequest(hRequest,
+                           WINHTTP_NO_ADDITIONAL_HEADERS,
+                           0,
+                           WINHTTP_NO_REQUEST_DATA,
+                           0,
+                           0,
+                           0))
+        goto cleanup;
+
+    // 接收响应
+    if (!WinHttpReceiveResponse(hRequest, NULL))
+        goto cleanup;
+
+    // 检查状态码
+    DWORD statusCode = 0;
+    DWORD size = sizeof(DWORD);
+    if (!WinHttpQueryHeaders(hRequest,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            NULL,
+                            &statusCode,
+                            &size,
+                            NULL) || statusCode != 200)
+        goto cleanup;
+
+    // 获取文件大小
+    DWORD contentLength = 0;
+    size = sizeof(DWORD);
+    WinHttpQueryHeaders(hRequest,
+                       WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                       NULL,
+                       &contentLength,
+                       &size,
+                       NULL);
+
+    if (contentLength == 0 || contentLength > 10 * 1024 * 1024) // 最大10MB
+        goto cleanup;
+
+    // 分配内存
+    if (firmware_data)
+    {
+        free(firmware_data);
+        firmware_data = NULL;
+    }
+
+    firmware_data = (unsigned char*)malloc(contentLength);
+    if (!firmware_data)
+        goto cleanup;
+
+    // 下载数据
+    DWORD total_downloaded = 0;
+    DWORD bytes_available = 0;
+    DWORD bytes_read = 0;
+
+    while (WinHttpQueryDataAvailable(hRequest, &bytes_available) && bytes_available > 0)
+    {
+        if (total_downloaded + bytes_available > contentLength)
+            break;
+
+        if (WinHttpReadData(hRequest, firmware_data + total_downloaded, bytes_available, &bytes_read))
+        {
+            total_downloaded += bytes_read;
+            
+            // 更新下载进度
+            int progress = (int)((total_downloaded * 100) / contentLength);
+            char msg[64];
+            _snprintf_s(msg, sizeof(msg), _TRUNCATE, "Downloading firmware... %d%%", progress);
+            SetFirmwareStatusMessage(msg);
+            dataChanged = true;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (total_downloaded == contentLength)
+    {
+        firmware_data_len = contentLength;
+        result = true;
+    }
+    else
+    {
+        free(firmware_data);
+        firmware_data = NULL;
+        firmware_data_len = 0;
+    }
+
+cleanup:
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnect) WinHttpCloseHandle(hConnect);
+    if (hSession) WinHttpCloseHandle(hSession);
+
+    return result;
 }
 
 
@@ -338,7 +806,7 @@ bool FindFirmwareFile(void)
         return false;
     }
 
-    unsigned long long latest_version = 0;
+    unsigned long long latest_version_num = 0;
     wchar_t latest_filename[MAX_PATH] = {0};
 
     do {
@@ -366,8 +834,8 @@ bool FindFirmwareFile(void)
         wcsncpy_s(version_str, 32, version_start, version_len);
         version_str[version_len] = L'\0';
         unsigned long long version = wcstoull(version_str, NULL, 10);
-        if (version > latest_version) {
-            latest_version = version;
+        if (version > latest_version_num) {
+            latest_version_num = version;
             wcscpy_s(latest_filename, MAX_PATH, find_data.cFileName);
         }
     } while (FindNextFileW(find_handle, &find_data) != 0);
@@ -381,6 +849,7 @@ bool FindFirmwareFile(void)
     wcscpy_s(firmware_path, MAX_PATH, exe_path);
     wcscat_s(firmware_path, MAX_PATH, latest_filename);
 
+    // 从文件名提取版本号 (例如: Curva_G431_2511061405.bin -> v1.2511061405)
     memset(firmware_version, 0, sizeof(firmware_version));
     const wchar_t *prefix = L"Curva_G431_";
     size_t prefix_len = wcslen(prefix);
@@ -391,7 +860,11 @@ bool FindFirmwareFile(void)
         if (dot != NULL) {
             *dot = L'\0';
         }
+        // 格式化为 v1.xxxxxxxxxx (例如 v1.2511061405)
         swprintf_s(firmware_version, 32, L"v1.%s", version_str);
+        
+        // 同时更新latest_version (转为char)
+        WideCharToMultiByte(CP_UTF8, 0, firmware_version, -1, latest_version, sizeof(latest_version), NULL, NULL);
     }
 
     FILE *f = NULL;
@@ -592,6 +1065,37 @@ int main()
             }
 
             dataChanged = false;
+        }
+        
+        // CDN检查时只刷新状态行（不刷新整个屏幕）
+        if (currentWindow == WINDOW_FIRMWARE_UPDATE && cdn_checking)
+        {
+            static DWORD lastBlinkTime = 0;
+            DWORD currentTime = GetTickCount();
+            if (currentTime - lastBlinkTime >= 500)
+            {
+                lastBlinkTime = currentTime;
+                
+                CONSOLE_SCREEN_BUFFER_INFO csbi;
+                GetConsoleScreenBufferInfo(hConsole, &csbi);
+                WORD defaultAttrs = csbi.wAttributes;
+                
+                // 只更新CDN状态那一行
+                SetCursorPosition(0, 6);
+                printf("│  Ruminasu CDN Status          [ ");
+                if ((currentTime / 500) % 2 == 0)
+                {
+                    SetConsoleTextAttribute(hConsole, COLOR_BLUE);
+                    printf("CHECKING");
+                    SetConsoleTextAttribute(hConsole, defaultAttrs);
+                    printf(" ]                                    │");  // CHECKING(8) + 36空格
+                }
+                else
+                {
+                    printf("        ");  // 8个空格
+                    printf(" ]                                    │");  // 8空格 + 36空格
+                }
+            }
         }
 
         // 设置刷新率
@@ -2118,11 +2622,36 @@ void HandleKeyInput()
     case '\r': // Enter键 - 开始固件更新
         if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
         {
-            // 如果固件未准备好，重新查找固件文件
-            if (!firmware_update_ready || firmware_data == NULL)
+            // 如果是CDN模式且固件数据还未下载，先下载
+            if (cdn_status_ok && firmware_data == NULL)
+            {
+                SetFirmwareStatusMessage("Downloading firmware from CDN...");
+                dataChanged = true;
+                
+                // 下载固件
+                char cdn_path[512];
+                WideCharToMultiByte(CP_UTF8, 0, firmware_path, -1, cdn_path, sizeof(cdn_path), NULL, NULL);
+                
+                if (!DownloadFirmwareFromCDN(cdn_path))
+                {
+                    firmware_update_ready = false;
+                    SetFirmwareStatusMessage("Failed to download firmware from CDN");
+                    dataChanged = true;
+                    break;
+                }
+                
+                firmware_update_ready = true;
+            }
+            // 如果是本地模式且固件数据还未加载
+            else if (!cdn_status_ok && firmware_data == NULL)
             {
                 firmware_update_ready = FindFirmwareFile();
-                dataChanged = true;
+                if (!firmware_update_ready)
+                {
+                    SetFirmwareStatusMessage("Failed to load local firmware");
+                    dataChanged = true;
+                    break;
+                }
             }
             
             // 如果固件已准备好，开始更新
@@ -2157,11 +2686,33 @@ void HandleKeyInput()
         case 61: // F3 - 更新固件
             if (currentWindow == WINDOW_MAIN)
             {
-                firmware_update_ready = FindFirmwareFile();
+                // 立即切换到固件更新窗口
                 currentWindow = WINDOW_FIRMWARE_UPDATE;
                 system("cls");
-                SetFirmwareStatusMessage(NULL);
+                
+                // 重置状态
+                cdn_checking = true;
+                cdn_status_ok = false;
+                firmware_update_ready = false;
+                strcpy(latest_version, "Checking...");
+                SetFirmwareStatusMessage("Checking CDN status...");
                 dataChanged = true;
+                
+                // 启动后台线程检查CDN
+                HANDLE hCDNThread = CreateThread(NULL, 0, CDNCheckThread, NULL, 0, NULL);
+                if (hCDNThread)
+                {
+                    CloseHandle(hCDNThread);
+                }
+                else
+                {
+                    // 线程创建失败，直接同步执行
+                    cdn_checking = false;
+                    cdn_status_ok = false;
+                    firmware_update_ready = FindFirmwareFile();
+                    SetFirmwareStatusMessage(firmware_update_ready ? "Using local firmware" : NULL);
+                    dataChanged = true;
+                }
             }
             else if (currentWindow == WINDOW_FIRMWARE_UPDATE && !firmware_updating)
             {
@@ -4733,7 +5284,29 @@ DWORD WINAPI UpdateFirmwareThread(LPVOID lpParam)
     SetFirmwareStatusMessage("Connected to DFU device (waiting for transfer)");
 
     char status_msg[256] = {0};
-    if (!dfu_loader_flash(firmware_path, dfu_progress_handler, NULL, status_msg, sizeof(status_msg)))
+    bool flash_result = false;
+    
+    // 如果固件数据已经在内存中（从CDN下载的），使用内存烧录
+    if (firmware_data != NULL && firmware_data_len > 0)
+    {
+        SetFirmwareStatusMessage("Flashing firmware from memory...");
+        flash_result = dfu_loader_flash_memory(firmware_data, firmware_data_len, 
+                                               dfu_progress_handler, NULL, status_msg, sizeof(status_msg));
+    }
+    // 否则从文件加载
+    else if (firmware_path[0] != L'\0')
+    {
+        SetFirmwareStatusMessage("Flashing firmware from file...");
+        flash_result = dfu_loader_flash(firmware_path, dfu_progress_handler, NULL, status_msg, sizeof(status_msg));
+    }
+    else
+    {
+        SetFirmwareStatusMessage("Error: No firmware data available");
+        firmware_updating = false;
+        return 1;
+    }
+    
+    if (!flash_result)
     {
         if (status_msg[0])
         {
@@ -4833,23 +5406,62 @@ void DisplayFirmwareUpdateWindow()
     printf("│                                                                               │");
 
     SetCursorPosition(0, 6);
-    printf("│  Detected Firmware: %-20S                                      │", firmware_version);
+    printf("│  Ruminasu CDN Status          [ ");
+    if (cdn_checking)
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_BLUE);
+        printf("CHECKING");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        printf(" ]                                    │");  
+    }
+    else if (cdn_status_ok)
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_GREEN);
+        printf("OK");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        printf(" ]                                          │");  
+    }
+    else
+    {
+        SetConsoleTextAttribute(hConsole, COLOR_RED);
+        printf("BAD");
+        SetConsoleTextAttribute(hConsole, defaultAttrs);
+        printf(" ]                                         │");  
+    }
 
     SetCursorPosition(0, 7);
-    printf("│  Firmware Path: %-57.57S     │", firmware_path[0] ? firmware_path : L"No firmware file found");
+    if (cdn_status_ok || cdn_checking)
+    {
+        printf("│  Latest FirmWare Version:     %-48s│", latest_version);
+    }
+    else
+    {
+        printf("│  Detected FirmWare Version:   %-48s│", latest_version);
+    }
 
     SetCursorPosition(0, 8);
-    printf("│  To use AutoUpdater, verify that the HW version is at least ");
-    SetConsoleTextAttribute(hConsole, COLOR_BLUE);
-    printf("v1.250515G");
-    SetConsoleTextAttribute(hConsole, defaultAttrs);
-    printf(".       │");
+    if (cdn_checking)
+    {
+        printf("│  Checking online firmware availability...                                     │");
+    }
+    else if (cdn_status_ok)
+    {
+        printf("│  Online Event Success, OTA procedure prepared                                 │");
+    }
+    else
+    {
+        printf("│  Online Event Fail, fallback to local update                                  │");
+    }
 
     SetCursorPosition(0, 9);
     printf("│                                                                               │");
 
     SetCursorPosition(0, 10);
-    if (firmware_update_ready)
+    if (cdn_checking)
+    {
+        printf("│  Please wait, checking firmware availability...                               │");
+    }
+    else if (firmware_update_ready)
     {
         printf("│  Ready to update. Press Enter to start firmware update                        │");
     }
@@ -4857,7 +5469,14 @@ void DisplayFirmwareUpdateWindow()
     {
         printf("│");
         SetConsoleTextAttribute(hConsole, COLOR_RED);
-        printf("  No valid firmware file found. Please put firmware files in program directory ");
+        if (cdn_status_ok)
+        {
+            printf("  Failed to download firmware from CDN                                      ");
+        }
+        else
+        {
+            printf("  No valid firmware file found. Please put firmware files in program directory ");
+        }
         SetConsoleTextAttribute(hConsole, defaultAttrs);
         printf("│");
     }

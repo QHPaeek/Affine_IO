@@ -23,4 +23,11 @@ bool dfu_loader_flash(const wchar_t *firmware_path,
                       char *status_buf,
                       size_t status_buf_len);
 
+bool dfu_loader_flash_memory(const unsigned char *firmware_data,
+                             size_t firmware_len,
+                             dfu_loader_progress_cb progress_cb,
+                             void *progress_ctx,
+                             char *status_buf,
+                             size_t status_buf_len);
+
 #endif /* MAI2IO_DFU_LOADER_H */

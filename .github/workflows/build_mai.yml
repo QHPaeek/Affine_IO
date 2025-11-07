@@ -16,29 +16,29 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      run_build: ${{ steps.final.outputs.run_build }}
+      run_build: ${{ steps.Final.outputs.run_build }}
     steps:
-      - id: pre
+      - id: PreCheck
         run: |
           if [ "${{ github.event_name }}" = "release" ] || [[ "${{ github.ref }}" == refs/tags/* ]] || [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "run_build=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_build=" >> "$GITHUB_OUTPUT"
           fi
-      - if: steps.pre.outputs.run_build == ''
+      - if: steps.PreCheck.outputs.run_build == ''
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - if: steps.pre.outputs.run_build == ''
+      - if: steps.PreCheck.outputs.run_build == ''
         id: filter
         uses: dorny/paths-filter@v3
         with:
           filters: |
             mai2io:
               - 'mai2io/**'
-      - id: final
+      - id: Final
         run: |
-          if [ -n "${{ steps.pre.outputs.run_build }}" ]; then
+          if [ -n "${{ steps.PreCheck.outputs.run_build }}" ]; then
             echo "run_build=true" >> "$GITHUB_OUTPUT"
           else
             if [ "${{ steps.filter.outputs.mai2io }}" = "true" ]; then

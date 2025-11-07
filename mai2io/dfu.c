@@ -858,27 +858,205 @@ bool dfu_loader_flash(const wchar_t *firmware_path,
 
         written += data_len;
 
-        int percent = (device.layout_valid ? 6 : 5) + (int)((written * 90ULL) / firmware_len);
-        if (percent > 95) {
-            percent = 95;
-        }
+        int percent = (device.layout_valid ? 6 : 5) + (int)((written * 94ULL) / firmware_len);
         report_progress(progress_cb, progress_ctx, percent);
     }
+
+    set_status(status_buf, status_buf_len, progress_ctx, "Finalizing firmware...");
+    report_progress(progress_cb, progress_ctx, 100);
 
     if (!dfu_download_block(&device, data_block_number, NULL, 0,
                             status_buf, status_buf_len, progress_ctx, true)) {
         goto cleanup;
     }
 
-    report_progress(progress_cb, progress_ctx, 99);
     set_status(status_buf, status_buf_len, progress_ctx, "Firmware written, device restarting");
     success = true;
 
 cleanup:
-    if (success) {
-        report_progress(progress_cb, progress_ctx, 100);
+    if (chunk_buffer) {
+        free(chunk_buffer);
     }
 
+    release_device(&device);
+
+    if (ctx) {
+        libusb_exit(ctx);
+    }
+
+    if (firmware_data) {
+        free(firmware_data);
+    }
+
+    if (!success && status_buf && status_buf_len && status_buf[0] == '\0') {
+        set_status(status_buf, status_buf_len, progress_ctx, "Unknown DFU failure");
+    }
+
+    return success;
+}
+
+bool dfu_loader_flash_memory(const unsigned char *input_firmware_data,
+                             size_t input_firmware_len,
+                             dfu_loader_progress_cb progress_cb,
+                             void *progress_ctx,
+                             char *status_buf,
+                             size_t status_buf_len)
+{
+    unsigned char *firmware_data = NULL;
+    size_t firmware_len = 0;
+    libusb_context *ctx = NULL;
+    stm32_dfu_device_t device = {0};
+    uint8_t *chunk_buffer = NULL;
+    bool success = false;
+
+    if (!input_firmware_data || input_firmware_len == 0) {
+        set_status(status_buf, status_buf_len, progress_ctx, "Error: invalid firmware data");
+        return false;
+    }
+
+    // 复制固件数据
+    firmware_data = (unsigned char *)malloc(input_firmware_len);
+    if (!firmware_data) {
+        set_status(status_buf, status_buf_len, progress_ctx, "Error: insufficient memory for firmware");
+        return false;
+    }
+    memcpy(firmware_data, input_firmware_data, input_firmware_len);
+    firmware_len = input_firmware_len;
+
+    report_progress(progress_cb, progress_ctx, 0);
+    set_status(status_buf, status_buf_len, progress_ctx, "Firmware loaded from memory");
+
+    set_status(status_buf, status_buf_len, progress_ctx, "Initialising USB...");
+    int ret = libusb_init(&ctx);
+    if (ret != LIBUSB_SUCCESS) {
+        set_status(status_buf, status_buf_len, progress_ctx,
+                   "Error: libusb init failed (%s)", libusb_error_name(ret));
+        goto cleanup;
+    }
+
+    set_status(status_buf, status_buf_len, progress_ctx, "Waiting for DFU device...");
+    if (!wait_for_stm32_dfu_device(ctx, &device, 10000, status_buf, status_buf_len, progress_ctx)) {
+        goto cleanup;
+    }
+
+    set_status(status_buf, status_buf_len, progress_ctx, "Preparing DFU state...");
+    if (!dfu_prepare_idle(&device, status_buf, status_buf_len, progress_ctx)) {
+        goto cleanup;
+    }
+
+    if (device.layout_valid) {
+        device.mass_erased = false;
+        device.last_erased_page = 0xFFFFFFFFu;
+    } else {
+        set_status(status_buf, status_buf_len, progress_ctx, "Performing mass erase...");
+        report_progress(progress_cb, progress_ctx, 3);
+        if (!dfu_mass_erase(&device, status_buf, status_buf_len, progress_ctx)) {
+            goto cleanup;
+        }
+        device.mass_erased = true;
+        if (!dfu_prepare_idle(&device, status_buf, status_buf_len, progress_ctx)) {
+            goto cleanup;
+        }
+        device.last_erased_page = 0xFFFFFFFFu;
+    }
+
+    set_status(status_buf, status_buf_len, progress_ctx,
+               "Setting write address 0x%08X", STM32_BASE_ADDRESS);
+    if (!dfu_set_address_pointer(&device, STM32_BASE_ADDRESS, status_buf, status_buf_len, progress_ctx)) {
+        goto cleanup;
+    }
+
+    report_progress(progress_cb, progress_ctx, device.layout_valid ? 6 : 5);
+    set_status(status_buf, status_buf_len, progress_ctx, "Writing firmware...");
+
+    chunk_buffer = (uint8_t *)malloc(device.transfer_size + 1);
+    if (!chunk_buffer) {
+        set_status(status_buf, status_buf_len, progress_ctx,
+                   "Error: insufficient memory for transfer buffer");
+        goto cleanup;
+    }
+
+    const uint16_t data_block_number = 2;
+    size_t written = 0;
+    while (written < firmware_len) {
+        size_t remaining = firmware_len - written;
+        size_t chunk_size = (remaining > device.transfer_size)
+                               ? device.transfer_size
+                               : remaining;
+
+        uint32_t chunk_address = STM32_BASE_ADDRESS + (uint32_t)written;
+        const stm32_dfu_segment_t *segment = NULL;
+        if (device.layout_valid) {
+            segment = find_segment(&device.layout, chunk_address);
+            if (!segment) {
+                set_status(status_buf, status_buf_len, progress_ctx,
+                           "Error: address 0x%08X outside DFU segment",
+                           chunk_address);
+                goto cleanup;
+            }
+            uint32_t seg_remaining = segment->end - chunk_address;
+            if (seg_remaining < chunk_size) {
+                chunk_size = seg_remaining;
+            }
+        }
+
+        if (!device.mass_erased && segment) {
+            if (!dfu_erase_range(&device,
+                                 chunk_address,
+                                 (uint32_t)chunk_size,
+                                 status_buf,
+                                 status_buf_len,
+                                 progress_ctx)) {
+                goto cleanup;
+            }
+        }
+
+        if (!dfu_set_address_pointer(&device, chunk_address, status_buf, status_buf_len, progress_ctx)) {
+            goto cleanup;
+        }
+
+        size_t data_len = chunk_size;
+        memcpy(chunk_buffer, firmware_data + written, data_len);
+        size_t aligned_len = (data_len % 2) ? (data_len + 1) : data_len;
+        if (aligned_len > data_len) {
+            chunk_buffer[data_len] = 0xFF;
+        }
+
+        if (!dfu_download_block(&device,
+                                data_block_number,
+                                chunk_buffer,
+                                (uint16_t)aligned_len,
+                                status_buf,
+                                status_buf_len,
+                                progress_ctx,
+                                false)) {
+            char detail[128];
+            _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                        "Error: write failed at 0x%08X (len=%u)",
+                        chunk_address,
+                        (unsigned)aligned_len);
+            set_status(status_buf, status_buf_len, progress_ctx, "%s", detail);
+            goto cleanup;
+        }
+
+        written += data_len;
+
+        int percent = (device.layout_valid ? 6 : 5) + (int)((written * 94ULL) / firmware_len);
+        report_progress(progress_cb, progress_ctx, percent);
+    }
+
+    set_status(status_buf, status_buf_len, progress_ctx, "Finalizing firmware...");
+    report_progress(progress_cb, progress_ctx, 100);
+
+    if (!dfu_download_block(&device, data_block_number, NULL, 0,
+                            status_buf, status_buf_len, progress_ctx, true)) {
+        goto cleanup;
+    }
+
+    set_status(status_buf, status_buf_len, progress_ctx, "Firmware written, device restarting");
+    success = true;
+
+cleanup:
     if (chunk_buffer) {
         free(chunk_buffer);
     }
