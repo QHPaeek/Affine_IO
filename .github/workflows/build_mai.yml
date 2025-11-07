@@ -78,7 +78,7 @@ jobs:
 
       - name: Build Mai Test Program
         run: |
-          gcc test.c serial.c dprintf.c dfu.c -lsetupapi -luser32 -lkernel32 -lwinhttp -Wl,-Bstatic $(pkg-config --cflags --libs libusb-1.0) -Wl,-Bdynamic -o test.exe
+          gcc test.c serial.c dprintf.c dfu.c -lsetupapi -luser32 -lkernel32 -lwinhttp -Wl,-Bstatic $(pkg-config --cflags --libs libusb-1.0) -Wl,-Bdynamic -o curva_test.exe
 
       - name: Upload DLL Artifact
         uses: actions/upload-artifact@v4
