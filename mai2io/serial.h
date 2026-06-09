@@ -24,7 +24,9 @@ typedef enum serial_cmd {
 	SERIAL_CMD_WRITE_TOUCH_SHEET = 0x8,
 	SERIAL_CMD_RESET = 0x10,
 	SERIAL_CMD_HEART_BEAT = 0x11,
-	SERIAL_CMD_GET_BOARD_INFO = 0xF0
+	SERIAL_CMD_GET_BOARD_INFO = 0xF0,
+	SERIAL_CMD_READ_DELAY_SETTING = 0x12,
+	SERIAL_CMD_WRITE_DELAY_SETTING = 0x13
 } serial_cmd_t;
 
 typedef union serial_packet {
@@ -73,6 +75,7 @@ BOOL open_port(HANDLE *hPortx,char* comPortx);
 void close_port(HANDLE *hPortx);
 void package_init(serial_packet_t *rsponse);
 uint8_t serial_read_cmd(HANDLE hPortx,serial_packet_t *request);
+void serial_writeresp(HANDLE hPortx, serial_packet_t *rsponse);
 void serial_heart_beat(HANDLE hPortx,serial_packet_t *rsponse);
 // void serial_change_touch_threshold(HANDLE hPortx,serial_packet_t *rsponse,uint8_t *touch_threshold);
 void serial_scan_start(HANDLE hPortx,serial_packet_t *rsponse);

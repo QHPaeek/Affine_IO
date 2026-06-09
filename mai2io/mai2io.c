@@ -60,7 +60,7 @@ uint16_t mai2_io_get_api_version(void)
 
 HRESULT mai2_io_init(void)
 {
-    dprintf("Affine IO:mai2_io_init\n");
+    dprintf("[Affine IO] Initializing Mai2IO\n");
     mai2_io_config_load(&mai2_io_cfg, L".\\segatools.ini");
     //read_json_to_threshold("curva_config.json", touch_threshold);
     return S_OK;
@@ -115,7 +115,7 @@ void mai2_io_get_gamebtns(uint16_t *player1, uint16_t *player2){
         *player2 = ~p2;
     }
     // #ifdef DEBUG
-    // dprintf("Affine IO:player1:%x,player2:%x\n",*player1,*player2);
+    // dprintf("[Affine IO] Player1: %x, Player2: %x\n", *player1, *player2);
     // #endif
 }
 
@@ -148,7 +148,7 @@ void mai2_io_touch_update(bool player1, bool player2) {
 }
 
 static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
-    dprintf("Affine IO:1p thread start\n");
+    dprintf("[Affine IO] 1P thread started\n");
     mai2_io_touch_callback_t callback = ctx;
     uint8_t state[7] = {0, 0, 0, 0, 0, 0, 0};
     package_init(&response1);	
@@ -174,9 +174,7 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
         snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
         
     }
-    dprintf("Affine IO:1P comPort:");
-    dprintf(comPort);
-    dprintf("\n");
+    dprintf("[Affine IO] 1P COM port: %s\n", comPort);
 
     open_port(&hPort1,comPort);
     while (!mai2_io_touch_1p_stop_flag) {
@@ -198,7 +196,7 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
 			    break;
             }
             case 0xff:{
-                dprintf("Affine IO:1p port error\n");
+                dprintf("[Affine IO] 1P port error, attempting reconnection\n");
                 memset(comPort,0,13);
                 while(hPort1 == NULL || hPort1 == INVALID_HANDLE_VALUE){
                     CloseHandle(hPort1);
@@ -216,21 +214,19 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
                         
                     }
                     #ifdef DEBUG
-                    dprintf("Affine IO:try 1P comPort:");
-                    dprintf(comPort);
-                    dprintf("\n");
+                    dprintf("[Affine IO] Trying 1P COM port: %s\n", comPort);
                     #endif
                     open_port(&hPort1,comPort);
                     Sleep(1000);
                 }
                 
-                dprintf("Affine IO:1P comPort reconnected\n");
+                dprintf("[Affine IO] 1P COM port reconnected successfully\n");
                 
                 break;
             }
             default:
                 #ifdef DEBUG
-                dprintf("Affine IO:other command:%x\n",cmd);
+                dprintf("[Affine IO] Unknown command received: 0x%02X\n", cmd);
                 #endif
                 break;
         }
@@ -247,7 +243,7 @@ static unsigned int __stdcall mai2_io_touch_1p_thread_proc(void *ctx){
 }
 
 static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
-    dprintf("Affine IO:2p thread start\n");
+    dprintf("[Affine IO] 2P thread started\n");
     mai2_io_touch_callback_t callback = ctx;
     uint8_t state[7] = {0, 0, 0, 0, 0, 0, 0};
     package_init(&response2);	
@@ -271,9 +267,7 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
         snprintf(comPort, 11, "\\\\.\\COM%d", port_num);
         
     }
-    dprintf("Affine IO:2P comPort:");
-    dprintf(comPort);
-    dprintf("\n");
+    dprintf("[Affine IO] 2P COM port: %s\n", comPort);
 
     open_port(&hPort2,comPort);
     while (!mai2_io_touch_2p_stop_flag) {
@@ -290,14 +284,13 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
                 }
 			    break;
                 case 0xff:{
-                    dprintf("Affine IO:2p port error\n");
-                    //dprintf("3\n");
+                    dprintf("[Affine IO] 2P port error, attempting reconnection\n");
                     memset(comPort,0,13);
                     while(hPort2 == NULL || hPort2 == INVALID_HANDLE_VALUE){
                         CloseHandle(hPort2);
-                        strncpy(comPort,GetSerialPortByVidPid(Vid,Pid_1p),6);
+                        strncpy(comPort,GetSerialPortByVidPid(Vid,Pid_2p),6);
                         if(comPort[0] == 0){
-                            int port_num = 11;
+                            int port_num = 12;
                             snprintf(comPort, 10, "\\\\.\\COM%d", port_num);
                         }else if(comPort[4] == 0){
                         }else if(comPort[5] == 0){
@@ -309,14 +302,12 @@ static unsigned int __stdcall mai2_io_touch_2p_thread_proc(void *ctx){
                             
                         }
                         #ifdef DEBUG
-                        dprintf("Affine IO:try 2P comPort:");
-                        dprintf(comPort);
-                        dprintf("\n");
+                        dprintf("[Affine IO] Trying 2P COM port: %s\n", comPort);
                         #endif
                         open_port(&hPort2,comPort);
                         Sleep(1000);
                     }
-                    dprintf("Affine IO:2P comPort reconnected\n");
+                    dprintf("[Affine IO] 2P COM port reconnected successfully\n");
                     break;
                 }
             default:
